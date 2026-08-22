@@ -1,19 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiError, createSession, get, loadDashboard, websocketUrl, write } from './api'
+import { fieldLabel, t, translateCode, type Language, type TextKey } from './locales'
 import type { Connection, ControlState, DashboardData, Plan, StreamEvent, TradingMode } from './types'
 
 type Section = 'overview' | 'scanner' | 'approval' | 'orders' | 'positions' | 'trades' | 'backtest' | 'logs' | 'settings'
+export type ThemePreference = 'system' | 'light' | 'dark'
+type IconName = Section | 'shield' | 'language' | 'appearance' | 'close' | 'lock' | 'refresh'
 
-const navigation: { id: Section; label: string; eyebrow: string }[] = [
-  { id: 'overview', label: 'Overview', eyebrow: '01' },
-  { id: 'scanner', label: 'Market & Signals', eyebrow: '02' },
-  { id: 'approval', label: 'Approval Center', eyebrow: '03' },
-  { id: 'orders', label: 'Order Lifecycle', eyebrow: '04' },
-  { id: 'positions', label: 'Positions', eyebrow: '05' },
-  { id: 'trades', label: 'Trades', eyebrow: '06' },
-  { id: 'backtest', label: 'Backtest Lab', eyebrow: '07' },
-  { id: 'logs', label: 'Logs & Audit', eyebrow: '08' },
-  { id: 'settings', label: 'Settings', eyebrow: '09' },
+const navigation: { id: Section; label: TextKey; subtitle: TextKey }[] = [
+  { id: 'overview', label: 'overview', subtitle: 'overviewSubtitle' },
+  { id: 'scanner', label: 'scanner', subtitle: 'scannerSubtitle' },
+  { id: 'approval', label: 'approval', subtitle: 'approvalSubtitle' },
+  { id: 'orders', label: 'orders', subtitle: 'ordersSubtitle' },
+  { id: 'positions', label: 'positions', subtitle: 'positionsSubtitle' },
+  { id: 'trades', label: 'trades', subtitle: 'tradesSubtitle' },
+  { id: 'backtest', label: 'backtest', subtitle: 'backtestSubtitle' },
+  { id: 'logs', label: 'logs', subtitle: 'logsSubtitle' },
+  { id: 'settings', label: 'settings', subtitle: 'settingsSubtitle' },
 ]
 
 const emptyData: DashboardData = { signals: [], plans: [], trades: [], logs: [], audit: [] }
@@ -22,22 +25,40 @@ export function highRiskWritesAllowed(control: ControlState | undefined, stream:
   return stream === 'CONNECTED' && control?.connection_state === 'CONNECTED' && !control.kill_switch_active
 }
 
+export function resolveTheme(preference: ThemePreference, darkScheme: boolean): 'light' | 'dark' {
+  return preference === 'system' ? (darkScheme ? 'dark' : 'light') : preference
+}
+
+function savedPreference<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  try {
+    const value = window.localStorage.getItem(key) as T | null
+    return value && allowed.includes(value) ? value : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function persistPreference(key: string, value: string) {
+  try { window.localStorage.setItem(key, value) } catch { /* browser storage may be disabled */ }
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
 
 function number(value: unknown): number | undefined {
-  return typeof value === 'number' ? value : typeof value === 'string' && value !== '' ? Number(value) : undefined
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' && value !== '' ? Number(value) : undefined
+  return parsed !== undefined && Number.isFinite(parsed) ? parsed : undefined
 }
 
-function fmt(value: unknown, digits = 2): string {
+function fmt(value: unknown, digits = 2, language: Language = 'en'): string {
   const parsed = number(value)
-  return parsed !== undefined && Number.isFinite(parsed) ? parsed.toLocaleString(undefined, { maximumFractionDigits: digits }) : '—'
+  return parsed === undefined ? '—' : parsed.toLocaleString(language === 'zh' ? 'zh-CN' : 'en-US', { maximumFractionDigits: digits })
 }
 
-function stamp(value: unknown): string {
+function stamp(value: unknown, language: Language): string {
   const parsed = number(value)
-  return parsed ? new Date(parsed).toLocaleString() : '—'
+  return parsed ? new Date(parsed).toLocaleString(language === 'zh' ? 'zh-CN' : 'en-US') : '—'
 }
 
 function reason(error: unknown): string {
@@ -45,47 +66,90 @@ function reason(error: unknown): string {
   return error instanceof Error ? error.message : 'UNKNOWN_ERROR'
 }
 
-export function SafetyBar({ control, stream }: { control?: ControlState; stream: Connection }) {
+function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
+  const paths: Record<IconName, ReactNode> = {
+    overview: <><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></>,
+    scanner: <><path d="M4 19V9"/><path d="M10 19V5"/><path d="M16 19v-7"/><path d="M22 19H2"/></>,
+    approval: <><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></>,
+    orders: <><path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6"/><path d="M9 13h8M9 17h8"/></>,
+    positions: <><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></>,
+    trades: <><path d="M4 17l5-5 4 3 7-8"/><path d="M15 7h5v5"/></>,
+    backtest: <><path d="M4 4v16h16"/><path d="M7 15l4-4 3 2 5-7"/></>,
+    logs: <><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></>,
+    settings: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21H9.6v-.09A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.51-1H3V10h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.51V3h4v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.51 1H21v4h-.09A1.7 1.7 0 0 0 19.4 15z"/></>,
+    shield: <><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></>,
+    language: <><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/></>,
+    appearance: <><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/></>,
+    close: <path d="M6 6l12 12M18 6L6 18"/>,
+    lock: <><rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></>,
+    refresh: <><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.5 9A7 7 0 0 0 6 6.5L4 11M5.5 15A7 7 0 0 0 18 17.5l2-4.5"/></>,
+  }
+  return <svg className="icon" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
+}
+
+export function SafetyBar({ control, stream, language = 'en' }: { control?: ControlState; stream: Connection; language?: Language }) {
   const environment = control?.environment ?? 'DEMO'
-  return (
-    <div className="safety-bar" aria-label="Safety status">
-      <div className="brand-lockup"><span className="brand-mark">OX</span><span>Agent Control</span><small>v2.1</small></div>
-      <div className="safety-states">
-        <StatusPill label="Environment" value={environment} tone={environment === 'DEMO' ? 'blue' : 'danger'} />
-        <StatusPill label="Mode" value={control?.trading_mode ?? 'STOPPED'} />
-        <StatusPill label="Execution" value={control?.execution_state ?? 'DISARMED'} tone={control?.execution_state === 'ARMED' ? 'amber' : 'muted'} />
-        <StatusPill label="Stream" value={stream} tone={stream === 'CONNECTED' ? 'green' : stream === 'STALE' ? 'amber' : 'danger'} />
-      </div>
+  return <header className="topbar" aria-label={language === 'zh' ? '交易安全状态' : 'Safety status'}>
+    <div className="brand-lockup"><span className="brand-mark">OKX</span><span><b>{t(language, 'product')}</b><small>{t(language, 'localControl')}</small></span></div>
+    <div className="safety-states">
+      <StatusPill label={t(language, 'environment')} value={translateCode(language, environment)} tone={environment === 'DEMO' ? 'blue' : 'danger'} />
+      <StatusPill label={t(language, 'mode')} value={translateCode(language, control?.trading_mode ?? 'STOPPED')} />
+      <StatusPill label={t(language, 'execution')} value={translateCode(language, control?.execution_state ?? 'DISARMED')} tone={control?.execution_state === 'ARMED' ? 'amber' : 'muted'} />
+      <StatusPill label={t(language, 'stream')} value={translateCode(language, stream)} tone={stream === 'CONNECTED' ? 'green' : stream === 'STALE' ? 'amber' : 'danger'} />
     </div>
-  )
+  </header>
 }
 
 function StatusPill({ label, value, tone = 'muted' }: { label: string; value: string; tone?: string }) {
-  return <span className={`status-pill ${tone}`}><small>{label}</small><b><i />{value}</b></span>
+  return <span className={`status-pill ${tone}`}><i /><span><small>{label}</small><b>{value}</b></span></span>
 }
 
-function Panel({ title, eyebrow, children, actions }: { title: string; eyebrow?: string; children: React.ReactNode; actions?: React.ReactNode }) {
-  return <section className="panel"><header><div><small>{eyebrow}</small><h2>{title}</h2></div>{actions}</header>{children}</section>
-}
-
-function JsonView({ value, empty = 'No data available' }: { value: unknown; empty?: string }) {
-  if (value === undefined || value === null || (Array.isArray(value) && value.length === 0)) return <Empty text={empty} />
-  return <pre className="json-view">{JSON.stringify(value, null, 2)}</pre>
+function Panel({ title, eyebrow, children, actions, className = '' }: { title: string; eyebrow?: string; children: ReactNode; actions?: ReactNode; className?: string }) {
+  return <section className={`panel ${className}`}><header className="panel-header"><div>{eyebrow && <small>{eyebrow}</small>}<h2>{title}</h2></div>{actions}</header>{children}</section>
 }
 
 function Empty({ text }: { text: string }) {
-  return <div className="empty"><span>∅</span><p>{text}</p></div>
+  return <div className="empty"><span className="empty-orb">—</span><p>{text}</p></div>
 }
 
-function Button({ children, danger, secondary, disabled, onClick, title }: {
-  children: React.ReactNode; danger?: boolean; secondary?: boolean; disabled?: boolean;
-  onClick: () => void; title?: string
-}) {
-  return <button className={`button ${danger ? 'danger' : ''} ${secondary ? 'secondary' : ''}`} disabled={disabled} onClick={onClick} title={title}>{children}</button>
+function Button({ children, danger, secondary, disabled, onClick, title, icon }: { children: ReactNode; danger?: boolean; secondary?: boolean; disabled?: boolean; onClick: () => void; title?: string; icon?: IconName }) {
+  return <button className={`button ${danger ? 'danger' : ''} ${secondary ? 'secondary' : ''}`} disabled={disabled} onClick={onClick} title={title}>{icon && <Icon name={icon} size={15} />}{children}</button>
+}
+
+function PreferenceControls({ language, theme, setLanguage, setTheme, compact = false }: { language: Language; theme: ThemePreference; setLanguage: (value: Language) => void; setTheme: (value: ThemePreference) => void; compact?: boolean }) {
+  return <div className={`preference-controls ${compact ? 'compact' : ''}`}>
+    <div className="preference-group" aria-label={t(language, 'language')}><Icon name="language" size={16} />{(['zh', 'en'] as Language[]).map((value) => <button key={value} className={language === value ? 'selected' : ''} onClick={() => setLanguage(value)}>{value === 'zh' ? '中文' : 'EN'}</button>)}</div>
+    <div className="preference-group theme-group" aria-label={t(language, 'theme')}><Icon name="appearance" size={16} />{(['system', 'light', 'dark'] as ThemePreference[]).map((value) => <button key={value} className={theme === value ? 'selected' : ''} onClick={() => setTheme(value)}>{t(language, value)}</button>)}</div>
+  </div>
+}
+
+function ObjectView({ value, empty, language }: { value: unknown; empty: string; language: Language }) {
+  if (value === undefined || value === null || (Array.isArray(value) && value.length === 0) || (typeof value === 'object' && !Array.isArray(value) && Object.keys(value as object).length === 0)) return <Empty text={empty} />
+  if (Array.isArray(value)) return <div className="object-list">{value.map((item, index) => <ObjectCard key={index} value={item} language={language} />)}</div>
+  return <ObjectCard value={value} language={language} />
+}
+
+function ObjectCard({ value, language }: { value: unknown; language: Language }) {
+  const record = asRecord(value)
+  if (!Object.keys(record).length) return <span className="primitive-value">{translateCode(language, value)}</span>
+  return <dl className="object-grid">{Object.entries(record).map(([key, item]) => <div key={key}><dt>{fieldLabel(language, key)}</dt><dd><DisplayValue value={item} language={language} /></dd></div>)}</dl>
+}
+
+function DisplayValue({ value, language }: { value: unknown; language: Language }) {
+  if (Array.isArray(value)) {
+    if (!value.length) return <span>—</span>
+    return <span className="value-list">{value.map((item, index) => <span key={index}>{typeof item === 'object' && item !== null ? <DisplayValue value={item} language={language} /> : translateCode(language, item)}</span>)}</span>
+  }
+  if (value && typeof value === 'object') {
+    return <span className="nested-record">{Object.entries(value as Record<string, unknown>).map(([key, item]) => <span key={key}><small>{fieldLabel(language, key)}</small><DisplayValue value={item} language={language} /></span>)}</span>
+  }
+  return <>{translateCode(language, value)}</>
 }
 
 function App() {
   const [section, setSection] = useState<Section>('overview')
+  const [language, setLanguageState] = useState<Language>(() => savedPreference('okx-language', ['zh', 'en'], 'zh'))
+  const [theme, setThemeState] = useState<ThemePreference>(() => savedPreference('okx-theme', ['system', 'light', 'dark'], 'system'))
   const [data, setData] = useState<DashboardData>(emptyData)
   const [stream, setStream] = useState<Connection>('DISCONNECTED')
   const [busy, setBusy] = useState('')
@@ -95,270 +159,124 @@ function App() {
   const [backtest, setBacktest] = useState<Record<string, unknown> | null>(null)
   const [backtestSymbol, setBacktestSymbol] = useState('BTC-USDT')
   const [backtestDays, setBacktestDays] = useState(7)
-  const lastMessage = useRef(0)
-  const reconnectTimer = useRef<number | undefined>(undefined)
-  const refreshTimer = useRef<number | undefined>(undefined)
+  const lastMessage = useRef(0), reconnectTimer = useRef<number | undefined>(undefined), refreshTimer = useRef<number | undefined>(undefined), languageRef = useRef(language)
 
-  const refresh = useCallback(async () => {
-    const next = await loadDashboard()
-    setData(next)
-  }, [])
+  const setLanguage = (value: Language) => { setLanguageState(value); persistPreference('okx-language', value) }
+  const setTheme = (value: ThemePreference) => { setThemeState(value); persistPreference('okx-theme', value) }
 
   useEffect(() => {
-    let active = true
-    let socket: WebSocket | null = null
+    const media = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null
+    const apply = () => { const resolved = resolveTheme(theme, media?.matches ?? false); document.documentElement.dataset.theme = resolved; document.documentElement.dataset.themePreference = theme; document.documentElement.style.colorScheme = resolved }
+    apply(); media?.addEventListener?.('change', apply)
+    return () => media?.removeEventListener?.('change', apply)
+  }, [theme])
+  useEffect(() => { languageRef.current = language; document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en' }, [language])
 
-    const scheduleRefresh = () => {
-      window.clearTimeout(refreshTimer.current)
-      refreshTimer.current = window.setTimeout(() => void refresh().catch(() => undefined), 300)
-    }
+  const refresh = useCallback(async () => setData(await loadDashboard()), [])
 
+  useEffect(() => {
+    let active = true, socket: WebSocket | null = null
+    const scheduleRefresh = () => { window.clearTimeout(refreshTimer.current); refreshTimer.current = window.setTimeout(() => void refresh().catch(() => undefined), 300) }
     const connect = () => {
       if (!active) return
       socket = new WebSocket(websocketUrl())
-      socket.onopen = () => {
-        lastMessage.current = Date.now()
-        setStream('CONNECTED')
-      }
+      socket.onopen = () => { lastMessage.current = Date.now(); setStream('CONNECTED') }
       socket.onmessage = (message) => {
-        lastMessage.current = Date.now()
-        setStream('CONNECTED')
-        const event = JSON.parse(message.data) as StreamEvent
-        if (event.type === 'snapshot') {
-          const snapshot = event.data as unknown as DashboardData
-          setData((current) => ({ ...current, ...snapshot }))
-          return
-        }
-        if (event.type === 'control.state') {
-          setData((current) => current.status ? ({
-            ...current,
-            status: { ...current.status, control: event.data as unknown as ControlState },
-          }) : current)
-          return
-        }
-        if (event.type === 'health.updated') {
-          setData((current) => ({ ...current, health: event.data }))
-          return
-        }
-        if (event.type === 'account.updated') {
-          setData((current) => ({ ...current, account: event.data }))
-          return
-        }
-        if (event.type === 'scanner.updated') {
-          setData((current) => ({ ...current, scanner: event.data }))
-          return
-        }
-        if (event.type !== 'heartbeat') scheduleRefresh()
+        lastMessage.current = Date.now(); setStream('CONNECTED')
+        try {
+          const event = JSON.parse(message.data) as StreamEvent
+          if (event.type === 'snapshot') setData((current) => ({ ...current, ...(event.data as unknown as DashboardData) }))
+          else if (event.type === 'control.state') setData((current) => current.status ? ({ ...current, status: { ...current.status, control: event.data as unknown as ControlState } }) : current)
+          else if (event.type === 'health.updated') setData((current) => ({ ...current, health: event.data }))
+          else if (event.type === 'account.updated') setData((current) => ({ ...current, account: event.data }))
+          else if (event.type === 'scanner.updated') setData((current) => ({ ...current, scanner: event.data }))
+          else if (event.type !== 'heartbeat') scheduleRefresh()
+        } catch { setStream('STALE') }
       }
       socket.onerror = () => setStream('DISCONNECTED')
-      socket.onclose = () => {
-        setStream('DISCONNECTED')
-        if (active) reconnectTimer.current = window.setTimeout(() => {
-          void createSession().then(connect).catch(() => {
-            if (active) reconnectTimer.current = window.setTimeout(connect, 2000)
-          })
-        }, 2000)
-      }
+      socket.onclose = () => { setStream('DISCONNECTED'); if (active) reconnectTimer.current = window.setTimeout(() => void createSession().then(connect).catch(() => { if (active) reconnectTimer.current = window.setTimeout(connect, 2000) }), 2000) }
     }
-
     void (async () => {
       try {
-        await createSession()
-        if (active) connect()
-        const incremental: [string, keyof DashboardData, unknown][] = [
-          ['/status', 'status', undefined], ['/health', 'health', {}],
-          ['/account', 'account', {}], ['/scanner', 'scanner', {}],
-          ['/signals?limit=100', 'signals', []], ['/plans?limit=100', 'plans', []],
-          ['/orders', 'orders', {}], ['/positions', 'positions', {}],
-          ['/trades', 'trades', []], ['/logs?limit=200', 'logs', []],
-          ['/audit-log?limit=100', 'audit', []], ['/settings', 'settings', {}],
-        ]
-        for (const [path, key, fallback] of incremental) {
-          void get<unknown>(path)
-            .then((value) => setData((current) => ({ ...current, [key]: value })))
-            .catch(() => setData((current) => ({ ...current, [key]: fallback })))
-        }
-      } catch (error) {
-        setNotice({ tone: 'error', text: `Startup failed: ${reason(error)}` })
-      }
+        await createSession(); if (active) connect()
+        const incremental: [string, keyof DashboardData, unknown][] = [['/status', 'status', undefined], ['/health', 'health', {}], ['/account', 'account', {}], ['/scanner', 'scanner', {}], ['/signals?limit=100', 'signals', []], ['/plans?limit=100', 'plans', []], ['/orders', 'orders', {}], ['/positions', 'positions', {}], ['/trades', 'trades', []], ['/logs?limit=200', 'logs', []], ['/audit-log?limit=100', 'audit', []], ['/settings', 'settings', {}]]
+        for (const [path, key, fallback] of incremental) void get<unknown>(path).then((value) => setData((current) => ({ ...current, [key]: value }))).catch(() => setData((current) => ({ ...current, [key]: fallback })))
+      } catch (error) { setNotice({ tone: 'error', text: `${t(languageRef.current, 'startupFailed')}: ${reason(error)}` }) }
     })()
-
-    const staleClock = window.setInterval(() => {
-      if (lastMessage.current && Date.now() - lastMessage.current > 7000) setStream('STALE')
-    }, 1000)
-    return () => {
-      active = false
-      window.clearInterval(staleClock)
-      window.clearTimeout(reconnectTimer.current)
-      window.clearTimeout(refreshTimer.current)
-      socket?.close()
-    }
+    const staleClock = window.setInterval(() => { if (lastMessage.current && Date.now() - lastMessage.current > 7000) setStream('STALE') }, 1000)
+    return () => { active = false; window.clearInterval(staleClock); window.clearTimeout(reconnectTimer.current); window.clearTimeout(refreshTimer.current); socket?.close() }
   }, [refresh])
 
   const control = data.status?.control
   const highRiskReady = highRiskWritesAllowed(control, stream)
   const executionReady = highRiskReady && control?.execution_state === 'ARMED' && control?.agent_runtime_state === 'RUNNING'
   const pending = useMemo(() => data.plans.filter((plan) => plan.ui_status === 'PENDING_APPROVAL'), [data.plans])
+  const currentPage = navigation.find((item) => item.id === section) ?? navigation[0]
+  const act = async (name: string, callback: () => Promise<unknown>) => { setBusy(name); setNotice(null); try { await callback(); await refresh(); setNotice({ tone: 'ok', text: `${name} ${t(language, 'completed')}` }) } catch (error) { setNotice({ tone: 'error', text: `${name}: ${translateCode(language, reason(error))}` }) } finally { setBusy('') } }
+  const setMode = (mode: TradingMode) => void act(`${t(language, 'modeAction')} ${mode}`, () => write('/mode', { mode }))
+  const revalidate = (plan: Plan) => void act(t(language, 'planRevalidation'), async () => { setPreview(await write<Record<string, unknown>>(`/plans/${encodeURIComponent(plan.plan_id)}/preview`)); setApprovalText('') })
+  const approve = () => void act(t(language, 'demoApproval'), async () => { await write(`/plans/${encodeURIComponent(String(preview?.plan_id ?? ''))}/approve`, { confirmation: approvalText }); setPreview(null) })
 
-  const act = async (name: string, callback: () => Promise<unknown>) => {
-    setBusy(name)
-    setNotice(null)
-    try {
-      await callback()
-      await refresh()
-      setNotice({ tone: 'ok', text: `${name} completed` })
-    } catch (error) {
-      setNotice({ tone: 'error', text: `${name}: ${reason(error)}` })
-    } finally {
-      setBusy('')
-    }
-  }
-
-  const setMode = (mode: TradingMode) => void act(`Mode ${mode}`, () => write('/mode', { mode }))
-  const revalidate = (plan: Plan) => void act('Plan revalidation', async () => {
-    const result = await write<Record<string, unknown>>(`/plans/${encodeURIComponent(plan.plan_id)}/preview`)
-    setPreview(result)
-    setApprovalText('')
-  })
-  const approve = () => {
-    const planId = String(preview?.plan_id ?? '')
-    void act('Demo approval', async () => {
-      await write(`/plans/${encodeURIComponent(planId)}/approve`, { confirmation: approvalText })
-      setPreview(null)
-    })
-  }
-
-  return (
-    <div className="app-shell">
-      <SafetyBar control={control} stream={stream} />
-      <aside>
-        <div className="side-intro"><small>Local control plane</small><strong>Capital first.<br />Automation second.</strong></div>
-        <nav>{navigation.map((item) => <button key={item.id} className={section === item.id ? 'active' : ''} onClick={() => setSection(item.id)}><span>{item.eyebrow}</span>{item.label}</button>)}</nav>
-        <div className="live-lock"><span>LIVE</span><b>Locked</b><p>W8 is not configured. No Live execution path exists.</p></div>
-      </aside>
-      <main>
-        <div className="page-heading">
-          <div><small>OKX DEMO · LOCALHOST</small><h1>{navigation.find((item) => item.id === section)?.label}</h1></div>
-          <div className="heading-meta"><span>Authoritative core</span><b>Python / single worker</b></div>
-        </div>
-        {notice && <div className={`notice ${notice.tone}`} role="status">{notice.text}<button onClick={() => setNotice(null)}>×</button></div>}
-        {stream !== 'CONNECTED' && <div className="stale-banner"><b>Write lock active</b> WebSocket is {stream.toLowerCase()}. ARM, approval and AUTO controls are disabled.</div>}
-
-        {section === 'overview' && <Overview data={data} control={control} pending={pending.length} />}
-        {section === 'scanner' && <Scanner data={data} busy={busy} run={() => void act('Market scan', () => write('/scanner/run'))} />}
-        {section === 'approval' && <Approval plans={data.plans} executionReady={Boolean(executionReady)} busy={busy} revalidate={revalidate} reject={(plan) => void act('Plan rejection', () => write(`/plans/${encodeURIComponent(plan.plan_id)}/reject`))} />}
-        {section === 'orders' && <Panel title="Persistent order lifecycle" eyebrow="Core states · SQLite"><JsonView value={data.orders} empty="No agent or OKX open orders" /></Panel>}
-        {section === 'positions' && <Panel title="Wallet & managed positions" eyebrow="Separated exposure semantics"><JsonView value={data.positions} /></Panel>}
-        {section === 'trades' && <DataTable title="Recorded trades" rows={data.trades} />}
-        {section === 'backtest' && <BacktestPanel result={backtest} symbol={backtestSymbol} days={backtestDays} busy={busy} setSymbol={setBacktestSymbol} setDays={setBacktestDays} run={(walkForward) => void act(walkForward ? 'Walk-forward' : 'Backtest', async () => setBacktest(await write('/backtest', { symbol: backtestSymbol, days: backtestDays, walk_forward: walkForward }) as Record<string, unknown>))} />}
-        {section === 'logs' && <LogsPanel logs={data.logs} audit={data.audit} />}
-        {section === 'settings' && <SettingsPanel data={data} control={control} stream={stream} highRiskReady={Boolean(highRiskReady)} busy={busy} setMode={setMode} act={act} refresh={refresh} />}
-      </main>
-
-      {preview && <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Approve Demo Trade">
-        <div className="modal">
-          <header><div><small>FRESH REVALIDATION PREVIEW</small><h2>Approve Demo Trade</h2></div><button onClick={() => setPreview(null)}>×</button></header>
-          <div className="preview-grid">
-            <Metric label="Symbol" value={preview.symbol} />
-            <Metric label="Executable price" value={fmt(preview.current_executable_price, 8)} />
-            <Metric label="Position size" value={fmt(preview.position_size, 8)} />
-            <Metric label="Risk amount" value={`$${fmt(preview.final_risk_amount)}`} />
-            <Metric label="Stop" value={fmt(preview.final_stop, 8)} />
-            <Metric label="Take profit" value={fmt(preview.final_take_profit, 8)} />
-          </div>
-          <label className="confirmation-field">Type <code>CONFIRM DEMO ORDER</code><input value={approvalText} onChange={(event) => setApprovalText(event.target.value)} autoComplete="off" /></label>
-          <div className="modal-actions"><Button secondary onClick={() => setPreview(null)}>Cancel</Button><Button disabled={approvalText !== 'CONFIRM DEMO ORDER' || !executionReady || Boolean(busy)} onClick={approve}>Submit Demo order</Button></div>
-        </div>
-      </div>}
-    </div>
-  )
-}
-
-function Overview({ data, control, pending }: { data: DashboardData; control?: ControlState; pending: number }) {
-  const account = asRecord(data.account)
-  const positions = asRecord(data.positions)
-  const eligibility = asRecord(asRecord(data.health).trading_eligibility)
-  return <>
-    <div className="metric-row">
-      <Metric label="Equity" value={`$${fmt(account.equity_usdt)}`} detail="Demo valuation" />
-      <Metric label="Available" value={`$${fmt(account.available_usdt)}`} detail="USDT available" />
-      <Metric label="Managed slots" value={`${fmt(positions.position_slots_in_use, 0)} / ${fmt(asRecord(data.settings).risk && asRecord(asRecord(data.settings).risk).max_open_positions, 0)}`} detail="Wallet assets excluded" />
-      <Metric label="Pending plans" value={String(pending)} detail="TTL-bound" />
-    </div>
-    <div className="two-column">
-      <Panel title="Trading eligibility" eyebrow={eligibility.eligible ? 'READY' : 'BLOCKED'}>
-        <div className={`eligibility ${eligibility.eligible ? 'pass' : 'blocked'}`}><span>{eligibility.eligible ? '✓' : '!'}</span><div><b>{String(eligibility.reason ?? 'DATA_UNAVAILABLE')}</b><p>{JSON.stringify(eligibility.blocking_reasons ?? [])}</p></div></div>
-      </Panel>
-      <Panel title="Runtime posture" eyebrow="Independent safety domains">
-        <dl className="definition-grid"><dt>Agent</dt><dd>{control?.agent_runtime_state ?? 'STOPPED'}</dd><dt>Mode</dt><dd>{control?.trading_mode ?? 'STOPPED'}</dd><dt>Execution</dt><dd>{control?.execution_state ?? 'DISARMED'}</dd><dt>Kill switch</dt><dd>{control?.kill_switch_active ? 'ACTIVE' : 'OFF'}</dd></dl>
-      </Panel>
-    </div>
-    <Panel title="Account exposure" eyebrow="Wallet + agent-managed + reserved"><JsonView value={account.exposure} /></Panel>
-  </>
-}
-
-function Metric({ label, value, detail }: { label: string; value: unknown; detail?: string }) {
-  return <div className="metric"><small>{label}</small><strong>{String(value ?? '—')}</strong>{detail && <span>{detail}</span>}</div>
-}
-
-function Scanner({ data, busy, run }: { data: DashboardData; busy: string; run: () => void }) {
-  const scans = Object.entries(data.scanner ?? {})
-  return <>
-    <Panel title="Configured symbol scanner" eyebrow="Core strategy output" actions={<Button onClick={run} disabled={Boolean(busy)}>Run read-only scan</Button>}>
-      {scans.length ? <div className="scan-grid">{scans.map(([symbol, raw]) => { const item = asRecord(raw); return <article key={symbol} className="scan-card"><header><b>{symbol}</b><span className={`decision ${String(item.decision).toLowerCase()}`}>{String(item.decision ?? item.status ?? 'UNKNOWN')}</span></header><strong>{fmt(item.current_price, 8)}</strong><dl><dt>Signal score</dt><dd>{fmt(item.signal_score, 0)} / 10</dd><dt>Signal strength</dt><dd>{fmt(number(item.signal_strength) ? number(item.signal_strength)! * 100 : undefined)}%</dd><dt>Risk</dt><dd>{String(item.risk_status ?? item.reason ?? '—')}</dd></dl></article> })}</div> : <Empty text="Run a scan to populate market decisions" />}
-    </Panel>
-    <DataTable title="Signal history" rows={data.signals} />
-  </>
-}
-
-function Approval({ plans, executionReady, busy, revalidate, reject }: { plans: Plan[]; executionReady: boolean; busy: string; revalidate: (plan: Plan) => void; reject: (plan: Plan) => void }) {
-  return <Panel title="Server-owned TradePlans" eyebrow="Fresh revalidation required">
-    {!plans.length ? <Empty text="No TradePlans recorded" /> : <div className="plan-list">{plans.map((plan) => {
-      const pending = plan.ui_status === 'PENDING_APPROVAL'
-      const seconds = Math.max(0, Math.floor((plan.expires_at_ms - Date.now()) / 1000))
-      return <article className="plan-row" key={plan.plan_id}><div className="plan-symbol"><b>{plan.symbol}</b><code>{plan.plan_id}</code></div><div><small>Status</small><strong>{plan.ui_status ?? plan.status}</strong>{pending && <span>{seconds}s TTL</span>}</div><div><small>Score / strength</small><strong>{fmt(plan.signal_score, 0)} / {fmt(number(plan.signal_strength) ? number(plan.signal_strength)! * 100 : undefined)}%</strong></div><div><small>Entry / size</small><strong>{fmt(plan.entry, 8)} · {fmt(plan.position_size, 8)}</strong></div><div className="row-actions"><Button secondary disabled={!pending || Boolean(busy)} onClick={() => reject(plan)}>Reject</Button><Button disabled={!pending || !executionReady || Boolean(busy)} title={!executionReady ? 'Requires fresh WebSocket, running Agent and ARMED execution' : undefined} onClick={() => revalidate(plan)}>Revalidate & approve</Button></div></article>
-    })}</div>}
-  </Panel>
-}
-
-function DataTable({ title, rows }: { title: string; rows: Record<string, unknown>[] }) {
-  const keys = useMemo(() => Array.from(new Set(rows.flatMap((row) => Object.keys(row)))).slice(0, 8), [rows])
-  return <Panel title={title} eyebrow={`${rows.length} records`}>{rows.length ? <div className="table-wrap"><table><thead><tr>{keys.map((key) => <th key={key}>{key.replaceAll('_', ' ')}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={String(row.id ?? row.plan_id ?? index)}>{keys.map((key) => <td key={key}>{typeof row[key] === 'object' ? JSON.stringify(row[key]) : String(row[key] ?? '—')}</td>)}</tr>)}</tbody></table></div> : <Empty text="No records yet" />}</Panel>
-}
-
-function BacktestPanel({ result, symbol, days, busy, setSymbol, setDays, run }: { result: Record<string, unknown> | null; symbol: string; days: number; busy: string; setSymbol: (value: string) => void; setDays: (value: number) => void; run: (walk: boolean) => void }) {
-  return <>
-    <Panel title="Historical evaluation" eyebrow="Paginated OHLCV · production rules">
-      <div className="form-row"><label>Symbol<input value={symbol} onChange={(event) => setSymbol(event.target.value.toUpperCase())} /></label><label>Range<select value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={7}>7 days</option><option value={30}>30 days</option><option value={90}>90 days</option></select></label><Button disabled={Boolean(busy)} onClick={() => run(false)}>Run backtest</Button><Button secondary disabled={Boolean(busy)} onClick={() => run(true)}>Walk-forward</Button></div>
-    </Panel>
-    <Panel title="Result" eyebrow="No strategy parameter tuning"><JsonView value={result} empty="Choose a configured range and run an evaluation" /></Panel>
-  </>
-}
-
-function LogsPanel({ logs, audit }: { logs: string[]; audit: Record<string, unknown>[] }) {
-  return <div className="two-column"><Panel title="Redacted runtime log" eyebrow={`${logs.length} lines`}><div className="log-view">{logs.length ? logs.map((line, index) => <code key={index}>{line}</code>) : <Empty text="No runtime logs" />}</div></Panel><Panel title="Control transition audit" eyebrow={`${audit.length} events`}><div className="audit-list">{audit.length ? audit.map((item, index) => <article key={String(item.id ?? index)}><small>{stamp(item.timestamp_ms)}</small><b>{String(item.requested_action)}</b><span>{String(item.reason)}</span></article>) : <Empty text="No control transitions" />}</div></Panel></div>
-}
-
-function SettingsPanel({ data, control, stream, highRiskReady, busy, setMode, act, refresh }: { data: DashboardData; control?: ControlState; stream: Connection; highRiskReady: boolean; busy: string; setMode: (mode: TradingMode) => void; act: (name: string, callback: () => Promise<unknown>) => Promise<void>; refresh: () => Promise<void> }) {
-  const [interval, setIntervalValue] = useState(control?.scan_interval_seconds ?? 15)
-  const [autoText, setAutoText] = useState('')
-  const [resetText, setResetText] = useState('')
-  useEffect(() => setIntervalValue(control?.scan_interval_seconds ?? 15), [control?.scan_interval_seconds])
-  return <>
-    <Panel title="Runtime controls" eyebrow="Action API · audited transitions">
-      <div className="control-stack">
-        <div className="control-line"><div><small>Environment</small><b>DEMO</b><p>Live is not configured in W0–W7.</p></div><button className="segmented active">DEMO</button><button className="segmented" disabled>LIVE · LOCKED</button></div>
-        <div className="control-line"><div><small>Trading mode</small><b>{control?.trading_mode ?? 'STOPPED'}</b><p>Mode and execution arming are independent.</p></div>{(['STOPPED', 'DRY_RUN', 'MANUAL_APPROVAL', 'AUTO'] as TradingMode[]).map((mode) => <button key={mode} className={`segmented ${control?.trading_mode === mode ? 'active' : ''}`} disabled={Boolean(busy) || (mode === 'AUTO' && (!control?.auto_demo_enabled || stream !== 'CONNECTED'))} onClick={() => setMode(mode)}>{mode}</button>)}</div>
-        <div className="control-line"><div><small>Agent runtime</small><b>{control?.agent_runtime_state ?? 'STOPPED'}</b><p>Scanner and reconciliation use the authoritative worker.</p></div><Button disabled={Boolean(busy) || control?.trading_mode === 'STOPPED'} onClick={() => void act('Start agent', () => write('/agent/start'))}>Start</Button><Button secondary disabled={Boolean(busy)} onClick={() => void act('Stop agent', () => write('/agent/stop'))}>Stop</Button></div>
-        <div className="control-line"><div><small>Demo execution</small><b>{control?.execution_state ?? 'DISARMED'}</b><p>ARM never survives a backend restart.</p></div><Button disabled={!highRiskReady || Boolean(busy) || control?.agent_runtime_state !== 'RUNNING' || control?.trading_mode === 'DRY_RUN' || control?.trading_mode === 'STOPPED'} onClick={() => void act('Arm execution', () => write('/execution/arm'))}>ARM</Button><Button secondary disabled={Boolean(busy)} onClick={() => void act('Disarm execution', () => write('/execution/disarm'))}>DISARM</Button></div>
+  return <div className="app-shell">
+    <SafetyBar control={control} stream={stream} language={language} />
+    <aside className="sidebar"><nav aria-label={language === 'zh' ? '主导航' : 'Primary navigation'}>{navigation.map((item) => <button key={item.id} className={section === item.id ? 'active' : ''} onClick={() => setSection(item.id)}><Icon name={item.id} /><span>{t(language, item.label)}</span>{item.id === 'approval' && pending.length > 0 && <b className="nav-badge">{pending.length}</b>}</button>)}</nav><div className="live-lock"><Icon name="lock" /><div><b>{t(language, 'liveLocked')}</b><p>{t(language, 'liveDescription')}</p></div></div></aside>
+    <main><div className="page-heading"><div><span className="page-kicker">OKX {translateCode(language, 'DEMO')} <i /> {t(language, 'localOnly')}</span><h1>{t(language, currentPage.label)}</h1><p>{t(language, currentPage.subtitle)}</p></div><PreferenceControls language={language} theme={theme} setLanguage={setLanguage} setTheme={setTheme} compact /></div>
+      {notice && <div className={`notice ${notice.tone}`} role="status"><span>{notice.text}</span><button aria-label={t(language, 'dismiss')} onClick={() => setNotice(null)}><Icon name="close" size={16} /></button></div>}
+      {stream !== 'CONNECTED' && <div className="stale-banner"><Icon name="shield" /><div><b>{t(language, 'writeLock')}</b><span>{t(language, 'writeLockDetail')}</span></div></div>}
+      <div className="page-content" key={`${section}-${language}`}>
+        {section === 'overview' && <Overview data={data} control={control} pending={pending.length} language={language} />}
+        {section === 'scanner' && <Scanner data={data} language={language} busy={busy} run={() => void act(t(language, 'marketScan'), () => write('/scanner/run'))} />}
+        {section === 'approval' && <Approval plans={data.plans} language={language} executionReady={Boolean(executionReady)} busy={busy} revalidate={revalidate} reject={(plan) => void act(t(language, 'planRejection'), () => write(`/plans/${encodeURIComponent(plan.plan_id)}/reject`))} />}
+        {section === 'orders' && <Panel title={t(language, 'persistentLifecycle')} eyebrow={t(language, 'coreStates')}><ObjectView value={data.orders} empty={t(language, 'noOrders')} language={language} /></Panel>}
+        {section === 'positions' && <Panel title={t(language, 'walletManaged')} eyebrow={t(language, 'exposureSemantics')}><ObjectView value={data.positions} empty={t(language, 'dataUnavailable')} language={language} /></Panel>}
+        {section === 'trades' && <DataTable title={t(language, 'recordedTrades')} rows={data.trades} language={language} />}
+        {section === 'backtest' && <BacktestPanel result={backtest} language={language} symbol={backtestSymbol} days={backtestDays} busy={busy} setSymbol={setBacktestSymbol} setDays={setBacktestDays} run={(walk) => void act(walk ? t(language, 'walkForwardAction') : t(language, 'backtestAction'), async () => setBacktest(await write('/backtest', { symbol: backtestSymbol, days: backtestDays, walk_forward: walk }) as Record<string, unknown>))} />}
+        {section === 'logs' && <LogsPanel logs={data.logs} audit={data.audit} language={language} />}
+        {section === 'settings' && <SettingsPanel data={data} control={control} stream={stream} language={language} theme={theme} setLanguage={setLanguage} setTheme={setTheme} highRiskReady={Boolean(highRiskReady)} busy={busy} setMode={setMode} act={act} />}
       </div>
-    </Panel>
-    <div className="two-column">
-      <Panel title="AUTO DEMO" eyebrow="Default off · session-only"><p className="panel-copy">AUTO can only be selected after an explicit enable phrase. It still uses Core signal, risk, sizing, plan and approval revalidation.</p><label className="confirmation-field">Type <code>ENABLE AUTO DEMO</code><input value={autoText} onChange={(event) => setAutoText(event.target.value)} /></label><div className="button-row"><Button disabled={autoText !== 'ENABLE AUTO DEMO' || !highRiskReady || Boolean(busy)} onClick={() => void act('Enable AUTO DEMO', () => write('/auto-demo/enable', { confirmation: autoText }))}>Enable</Button><Button secondary disabled={Boolean(busy)} onClick={() => void act('Disable AUTO DEMO', () => write('/auto-demo/disable'))}>Disable</Button></div></Panel>
-      <Panel title="Kill switch" eyebrow={control?.kill_switch_active ? 'ACTIVE' : 'OFF'}><p className="panel-copy">Stops new entries, AUTO and the runtime. Existing protective TP/SL orders are preserved.</p><div className="button-row"><Button danger disabled={Boolean(busy)} onClick={() => { if (window.confirm('Activate kill switch? Existing protection remains active.')) void act('Kill switch', () => write('/kill-switch')) }}>ACTIVATE KILL SWITCH</Button></div>{control?.kill_switch_active && <><label className="confirmation-field">Type <code>RESET KILL SWITCH</code><input value={resetText} onChange={(event) => setResetText(event.target.value)} /></label><Button secondary disabled={resetText !== 'RESET KILL SWITCH' || Boolean(busy)} onClick={() => void act('Reset kill switch', () => write('/kill-switch/reset', { confirmation: resetText }))}>Reset to safe STOPPED</Button></>}</Panel>
-    </div>
-    <Panel title="Runtime settings" eyebrow="Low-risk allowlist only"><div className="form-row"><label>Scan interval (seconds)<input type="number" min={5} max={3600} value={interval} onChange={(event) => setIntervalValue(Number(event.target.value))} /></label><Button secondary disabled={Boolean(busy)} onClick={() => void act('Update interval', () => write('/settings/runtime', { scan_interval_seconds: interval }, 'PUT'))}>Save interval</Button></div><JsonView value={data.settings} /></Panel>
-  </>
+    </main>
+    {preview && <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={t(language, 'approveDemo')} onMouseDown={(event) => { if (event.target === event.currentTarget) setPreview(null) }}><div className="modal"><header><div><small>{t(language, 'freshPreview')}</small><h2>{t(language, 'approveDemo')}</h2></div><button className="close-button" aria-label={t(language, 'close')} onClick={() => setPreview(null)}><Icon name="close" /></button></header><div className="preview-grid"><Metric label={t(language, 'symbol')} value={preview.symbol} /><Metric label={t(language, 'executablePrice')} value={fmt(preview.current_executable_price, 8, language)} /><Metric label={t(language, 'positionSize')} value={fmt(preview.position_size, 8, language)} /><Metric label={t(language, 'riskAmount')} value={`$${fmt(preview.final_risk_amount, 2, language)}`} /><Metric label={t(language, 'stopPrice')} value={fmt(preview.final_stop, 8, language)} /><Metric label={t(language, 'takeProfit')} value={fmt(preview.final_take_profit, 8, language)} /></div><label className="confirmation-field">{t(language, 'typePhrase')} <code>CONFIRM DEMO ORDER</code><input value={approvalText} onChange={(event) => setApprovalText(event.target.value)} autoComplete="off" /></label><div className="modal-actions"><Button secondary onClick={() => setPreview(null)}>{t(language, 'cancel')}</Button><Button disabled={approvalText !== 'CONFIRM DEMO ORDER' || !executionReady || Boolean(busy)} onClick={approve}>{t(language, 'submitDemo')}</Button></div></div></div>}
+  </div>
+}
+
+function Overview({ data, control, pending, language }: { data: DashboardData; control?: ControlState; pending: number; language: Language }) {
+  const account = asRecord(data.account), positions = asRecord(data.positions), eligibility = asRecord(asRecord(data.health).trading_eligibility), risk = asRecord(asRecord(data.settings).risk)
+  return <><div className="metric-row"><Metric label={t(language, 'equity')} value={`$${fmt(account.equity_usdt, 2, language)}`} detail={t(language, 'demoValuation')} accent="blue" /><Metric label={t(language, 'available')} value={`$${fmt(account.available_usdt, 2, language)}`} detail={t(language, 'usdtAvailable')} /><Metric label={t(language, 'managedSlots')} value={`${fmt(positions.position_slots_in_use, 0, language)} / ${fmt(risk.max_open_positions, 0, language)}`} detail={t(language, 'walletExcluded')} /><Metric label={t(language, 'pendingPlans')} value={String(pending)} detail={t(language, 'ttlBound')} accent={pending ? 'amber' : undefined} /></div><div className="two-column"><Panel title={t(language, 'tradingEligibility')} eyebrow={eligibility.eligible ? t(language, 'ready') : t(language, 'blocked')}><div className={`eligibility ${eligibility.eligible ? 'pass' : 'blocked'}`}><span>{eligibility.eligible ? '✓' : '!'}</span><div><b title={String(eligibility.reason ?? 'DATA_UNAVAILABLE')}>{translateCode(language, eligibility.reason ?? 'DATA_UNAVAILABLE')}</b><p>{Array.isArray(eligibility.blocking_reasons) ? eligibility.blocking_reasons.map((item) => translateCode(language, item)).join(' · ') : '—'}</p></div></div></Panel><Panel title={t(language, 'runtimePosture')} eyebrow={t(language, 'independentSafety')}><dl className="definition-grid"><dt>{t(language, 'agent')}</dt><dd>{translateCode(language, control?.agent_runtime_state ?? 'STOPPED')}</dd><dt>{t(language, 'mode')}</dt><dd>{translateCode(language, control?.trading_mode ?? 'STOPPED')}</dd><dt>{t(language, 'execution')}</dt><dd>{translateCode(language, control?.execution_state ?? 'DISARMED')}</dd><dt>{t(language, 'killSwitch')}</dt><dd>{translateCode(language, control?.kill_switch_active ? 'ACTIVE' : 'OFF')}</dd></dl></Panel></div><Panel title={t(language, 'accountExposure')} eyebrow={t(language, 'exposureSubtitle')}><ObjectView value={account.exposure} empty={t(language, 'dataUnavailable')} language={language} /></Panel></>
+}
+
+function Metric({ label, value, detail, accent }: { label: string; value: unknown; detail?: string; accent?: 'blue' | 'amber' }) { return <div className={`metric ${accent ?? ''}`}><small>{label}</small><strong>{String(value ?? '—')}</strong>{detail && <span>{detail}</span>}</div> }
+
+function Scanner({ data, busy, run, language }: { data: DashboardData; busy: string; run: () => void; language: Language }) {
+  const scans = Object.entries(data.scanner ?? {})
+  return <><Panel title={t(language, 'configuredScanner')} eyebrow={t(language, 'strategyOutput')} actions={<Button icon="refresh" onClick={run} disabled={Boolean(busy)}>{t(language, 'runScan')}</Button>}>{scans.length ? <div className="scan-grid">{scans.map(([symbol, raw]) => { const item = asRecord(raw), strength = number(item.signal_strength); return <article key={symbol} className="scan-card"><header><b>{symbol}</b><span className={`decision ${String(item.decision).toLowerCase()}`}>{translateCode(language, item.decision ?? item.status ?? 'UNKNOWN')}</span></header><strong>{fmt(item.current_price, 8, language)}</strong><dl><dt>{t(language, 'signalScore')}</dt><dd>{fmt(item.signal_score, 0, language)} / 10</dd><dt>{t(language, 'signalStrength')}</dt><dd>{strength === undefined ? '—' : `${fmt(strength * 100, 1, language)}%`}</dd><dt>{t(language, 'risk')}</dt><dd>{translateCode(language, item.risk_status ?? item.reason ?? '—')}</dd></dl></article> })}</div> : <Empty text={t(language, 'scanEmpty')} />}</Panel><DataTable title={t(language, 'signalHistory')} rows={data.signals} language={language} /></>
+}
+
+function Approval({ plans, executionReady, busy, revalidate, reject, language }: { plans: Plan[]; executionReady: boolean; busy: string; revalidate: (plan: Plan) => void; reject: (plan: Plan) => void; language: Language }) {
+  return <Panel title={t(language, 'serverPlans')} eyebrow={t(language, 'freshRevalidation')}>{!plans.length ? <Empty text={t(language, 'noPlans')} /> : <div className="plan-list">{plans.map((plan) => { const pending = plan.ui_status === 'PENDING_APPROVAL', seconds = Math.max(0, Math.floor((plan.expires_at_ms - Date.now()) / 1000)), strength = number(plan.signal_strength); return <article className="plan-row" key={plan.plan_id}><div className="plan-symbol"><b>{plan.symbol}</b><code>{plan.plan_id}</code></div><div><small>{t(language, 'status')}</small><strong>{translateCode(language, plan.ui_status ?? plan.status)}</strong>{pending && <span>{language === 'zh' ? `剩余 ${seconds} 秒` : `${seconds}s TTL`}</span>}</div><div><small>{t(language, 'scoreStrength')}</small><strong>{fmt(plan.signal_score, 0, language)} / {strength === undefined ? '—' : `${fmt(strength * 100, 1, language)}%`}</strong></div><div><small>{t(language, 'entrySize')}</small><strong>{fmt(plan.entry, 8, language)} · {fmt(plan.position_size, 8, language)}</strong></div><div className="row-actions"><Button secondary disabled={!pending || Boolean(busy)} onClick={() => reject(plan)}>{t(language, 'reject')}</Button><Button disabled={!pending || !executionReady || Boolean(busy)} title={!executionReady ? t(language, 'executionRequirement') : undefined} onClick={() => revalidate(plan)}>{t(language, 'revalidateApprove')}</Button></div></article> })}</div>}</Panel>
+}
+
+function DataTable({ title, rows, language }: { title: string; rows: Record<string, unknown>[]; language: Language }) {
+  const keys = useMemo(() => Array.from(new Set(rows.flatMap((row) => Object.keys(row)))).slice(0, 8), [rows])
+  return <Panel title={title} eyebrow={`${rows.length} ${t(language, 'records')}`}>{rows.length ? <div className="table-wrap"><table><thead><tr>{keys.map((key) => <th key={key}>{fieldLabel(language, key)}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={String(row.id ?? row.plan_id ?? index)}>{keys.map((key) => <td key={key}><DisplayValue value={row[key]} language={language} /></td>)}</tr>)}</tbody></table></div> : <Empty text={t(language, 'noRecords')} />}</Panel>
+}
+
+function BacktestPanel({ result, symbol, days, busy, setSymbol, setDays, run, language }: { result: Record<string, unknown> | null; symbol: string; days: number; busy: string; setSymbol: (value: string) => void; setDays: (value: number) => void; run: (walk: boolean) => void; language: Language }) {
+  return <><Panel title={t(language, 'historicalEvaluation')} eyebrow={t(language, 'historicalSubtitle')}><div className="form-row"><label>{t(language, 'symbol')}<input value={symbol} onChange={(event) => setSymbol(event.target.value.toUpperCase())} /></label><label>{t(language, 'range')}<select value={days} onChange={(event) => setDays(Number(event.target.value))}>{[7, 30, 90].map((value) => <option key={value} value={value}>{value} {t(language, 'days')}</option>)}</select></label><Button disabled={Boolean(busy)} onClick={() => run(false)}>{t(language, 'runBacktest')}</Button><Button secondary disabled={Boolean(busy)} onClick={() => run(true)}>{t(language, 'walkForward')}</Button></div></Panel><Panel title={t(language, 'result')} eyebrow={t(language, 'noTuning')}><ObjectView value={result} empty={t(language, 'evaluationEmpty')} language={language} /></Panel></>
+}
+
+function LogsPanel({ logs, audit, language }: { logs: string[]; audit: Record<string, unknown>[]; language: Language }) {
+  return <div className="two-column"><Panel title={t(language, 'runtimeLog')} eyebrow={`${logs.length} ${t(language, 'lines')}`}><div className="log-view">{logs.length ? logs.map((line, index) => <code key={index}>{line}</code>) : <Empty text={t(language, 'noLogs')} />}</div></Panel><Panel title={t(language, 'transitionAudit')} eyebrow={`${audit.length} ${t(language, 'events')}`}><div className="audit-list">{audit.length ? audit.map((item, index) => <article key={String(item.id ?? index)}><small>{stamp(item.timestamp_ms, language)}</small><b>{translateCode(language, item.requested_action)}</b><span>{translateCode(language, item.reason)}</span></article>) : <Empty text={t(language, 'noAudit')} />}</div></Panel></div>
+}
+
+function SettingsPanel({ data, control, stream, highRiskReady, busy, setMode, act, language, theme, setLanguage, setTheme }: { data: DashboardData; control?: ControlState; stream: Connection; highRiskReady: boolean; busy: string; setMode: (mode: TradingMode) => void; act: (name: string, callback: () => Promise<unknown>) => Promise<void>; language: Language; theme: ThemePreference; setLanguage: (value: Language) => void; setTheme: (value: ThemePreference) => void }) {
+  const [interval, setIntervalValue] = useState(control?.scan_interval_seconds ?? 15), [autoText, setAutoText] = useState(''), [resetText, setResetText] = useState('')
+  useEffect(() => setIntervalValue(control?.scan_interval_seconds ?? 15), [control?.scan_interval_seconds])
+  return <><Panel title={t(language, 'appearance')} eyebrow={t(language, 'appearanceSubtitle')}><div className="appearance-settings"><div><Icon name="language"/><span><b>{t(language, 'language')}</b><small>{language === 'zh' ? t(language, 'chinese') : t(language, 'english')}</small></span></div><PreferenceControls language={language} theme={theme} setLanguage={setLanguage} setTheme={setTheme} /></div></Panel><Panel title={t(language, 'runtimeControls')} eyebrow={t(language, 'auditedTransitions')}><div className="control-stack">
+    <div className="control-line"><div><small>{t(language, 'environment')}</small><b>{translateCode(language, 'DEMO')}</b><p>{t(language, 'liveNotConfigured')}</p></div><button className="segmented active">{translateCode(language, 'DEMO')}</button><button className="segmented" disabled>{translateCode(language, 'LIVE')} · {translateCode(language, 'LOCKED')}</button></div>
+    <div className="control-line"><div><small>{t(language, 'tradingMode')}</small><b>{translateCode(language, control?.trading_mode ?? 'STOPPED')}</b><p>{t(language, 'modeIndependent')}</p></div><div className="segmented-control">{(['STOPPED', 'DRY_RUN', 'MANUAL_APPROVAL', 'AUTO'] as TradingMode[]).map((mode) => <button key={mode} className={`segmented ${control?.trading_mode === mode ? 'active' : ''}`} disabled={Boolean(busy) || (mode === 'AUTO' && (!control?.auto_demo_enabled || stream !== 'CONNECTED'))} onClick={() => setMode(mode)}>{translateCode(language, mode)}</button>)}</div></div>
+    <div className="control-line"><div><small>{t(language, 'agentRuntime')}</small><b>{translateCode(language, control?.agent_runtime_state ?? 'STOPPED')}</b><p>{t(language, 'workerDescription')}</p></div><Button disabled={Boolean(busy) || control?.trading_mode === 'STOPPED'} onClick={() => void act(t(language, 'startAgent'), () => write('/agent/start'))}>{t(language, 'start')}</Button><Button secondary disabled={Boolean(busy)} onClick={() => void act(t(language, 'stopAgent'), () => write('/agent/stop'))}>{t(language, 'stop')}</Button></div>
+    <div className="control-line"><div><small>{t(language, 'demoExecution')}</small><b>{translateCode(language, control?.execution_state ?? 'DISARMED')}</b><p>{t(language, 'armRestart')}</p></div><Button disabled={!highRiskReady || Boolean(busy) || control?.agent_runtime_state !== 'RUNNING' || control?.trading_mode === 'DRY_RUN' || control?.trading_mode === 'STOPPED'} onClick={() => void act(t(language, 'armExecution'), () => write('/execution/arm'))}>{t(language, 'arm')}</Button><Button secondary disabled={Boolean(busy)} onClick={() => void act(t(language, 'disarmExecution'), () => write('/execution/disarm'))}>{t(language, 'disarm')}</Button></div>
+  </div></Panel><div className="two-column"><Panel title={t(language, 'autoDemo')} eyebrow={t(language, 'sessionOnly')}><p className="panel-copy">{t(language, 'autoDescription')}</p><label className="confirmation-field">{t(language, 'typePhrase')} <code>ENABLE AUTO DEMO</code><input value={autoText} onChange={(event) => setAutoText(event.target.value)} /></label><div className="button-row"><Button disabled={autoText !== 'ENABLE AUTO DEMO' || !highRiskReady || Boolean(busy)} onClick={() => void act(t(language, 'enableAuto'), () => write('/auto-demo/enable', { confirmation: autoText }))}>{t(language, 'enable')}</Button><Button secondary disabled={Boolean(busy)} onClick={() => void act(t(language, 'disableAuto'), () => write('/auto-demo/disable'))}>{t(language, 'disable')}</Button></div></Panel><Panel title={t(language, 'killSwitch')} eyebrow={translateCode(language, control?.kill_switch_active ? 'ACTIVE' : 'OFF')} className="danger-panel"><p className="panel-copy">{t(language, 'killDescription')}</p><div className="button-row"><Button danger disabled={Boolean(busy)} onClick={() => { if (window.confirm(t(language, 'killConfirm'))) void act(t(language, 'killSwitch'), () => write('/kill-switch')) }}>{t(language, 'activateKill')}</Button></div>{control?.kill_switch_active && <><label className="confirmation-field">{t(language, 'typePhrase')} <code>RESET KILL SWITCH</code><input value={resetText} onChange={(event) => setResetText(event.target.value)} /></label><Button secondary disabled={resetText !== 'RESET KILL SWITCH' || Boolean(busy)} onClick={() => void act(t(language, 'resetKill'), () => write('/kill-switch/reset', { confirmation: resetText }))}>{t(language, 'resetSafe')}</Button></>}</Panel></div><Panel title={t(language, 'runtimeSettings')} eyebrow={t(language, 'allowlistOnly')}><div className="form-row"><label>{t(language, 'scanInterval')}<input type="number" min={5} max={3600} value={interval} onChange={(event) => setIntervalValue(Number(event.target.value))} /></label><Button secondary disabled={Boolean(busy)} onClick={() => void act(t(language, 'updateInterval'), () => write('/settings/runtime', { scan_interval_seconds: interval }, 'PUT'))}>{t(language, 'saveInterval')}</Button></div><details className="advanced-details"><summary>{language === 'zh' ? '查看核心配置' : 'View core configuration'}</summary><ObjectView value={data.settings} empty={t(language, 'dataUnavailable')} language={language} /></details></Panel></>
 }
 
 export default App
