@@ -1,0 +1,64 @@
+environment: demo
+
+market:
+  instrument_type: spot
+  minimum_candles: 50
+  stale_after_seconds: 120
+
+timeframes:
+  primary: 1m
+  confirmation:
+    - 3m
+    - 5m
+
+risk:
+  risk_per_trade: 0.005
+  max_position_pct: 0.10
+  max_total_exposure_pct: 0.90
+  max_daily_loss_pct: 0.03
+  max_consecutive_losses: 3
+  max_open_positions: 2
+
+trade:
+  minimum_risk_reward: 1.5
+  require_stop_loss: true
+  require_take_profit: true
+
+scalping:
+  cooldown_seconds: 60
+  max_spread_pct: 0.10
+  minimum_volume_ratio: 1.2
+  minimum_signal_score: 7
+  minimum_signal_strength: 0.70
+
+execution:
+  backend: mcp
+  demo_only: true
+  allow_market_orders: true
+  allow_limit_orders: true
+  slippage_guard_enabled: true
+  max_slippage_pct: 0.15
+  max_entry_deviation_pct: 0.15
+  trade_plan_ttl_seconds: 60
+  safe_retry_after_reconciliation: false
+  require_verified_protection: true
+
+approval:
+  require_user_confirmation: true
+
+backtest:
+  fee_pct: 0.001
+  spread_pct: 0.0005
+  slippage_pct: 0.0003
+  initial_equity: 10000
+  default_days: 7
+  page_size: 100
+  cache_enabled: true
+  walk_forward:
+    train_bars: 1440
+    test_bars: 1440
+    step_bars: 1440
+
+runtime:
+  default_state: MANUAL_APPROVAL
+  auto_demo_enabled: false

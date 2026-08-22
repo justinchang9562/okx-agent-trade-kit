@@ -1,0 +1,9 @@
+environments:
+  demo:
+    enabled: true
+    backend: mcp
+  live:
+    enabled: false
+    backend: native_api
+    require_cli_flag: true
+    require_explicit_confirmation: true

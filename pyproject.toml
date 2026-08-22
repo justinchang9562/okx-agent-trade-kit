@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "okx-agent-trade-kit"
+version = "0.1.0"
+description = "Deterministic minute-level OKX Demo spot scalping agent"
+requires-python = ">=3.11"
+dependencies = ["PyYAML>=6.0.2,<7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<10", "pytest-cov>=6,<8"]
+
+[project.scripts]
+okx-agent = "trading_agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["trading_agent", "data", "indicators", "strategies", "risk", "decision", "execution", "backtest", "storage", "monitoring"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["integration: calls the configured OKX Demo backend without placing orders"]
