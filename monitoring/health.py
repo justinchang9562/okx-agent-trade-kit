@@ -10,6 +10,7 @@ from execution.cli_backend import CLIBackend
 from execution.native_api_backend import NativeAPIBackend
 from execution.okx_adapter import OKXAdapter
 from storage.database import connect
+from trading_agent import __version__
 from trading_agent.config import AppConfig
 
 
@@ -23,13 +24,13 @@ def run_health(config: AppConfig, adapter: OKXAdapter) -> dict[str, Any]:
         "native_api_backend": asdict(NativeAPIBackend().status()),
         "market_data": "FAIL",
         "account": "FAIL",
-        "risk_engine": "PASS",
-        "managed_position_semantics": "FAIL",
-        "persistent_order_lifecycle": "FAIL",
-        "idempotency": "FAIL",
+        "risk_engine": "IMPLEMENTED",
+        "managed_position_semantics": "SCHEMA_NOT_READY",
+        "persistent_order_lifecycle": "SCHEMA_NOT_READY",
+        "idempotency": "SCHEMA_NOT_READY",
         "tp_sl_capability": "UNKNOWN",
         "auto_demo": "DISABLED",
-        "demo_execution": "BLOCKED",
+        "demo_execution": "NOT_READY",
         "live_trading": "LOCKED",
     }
     database_path = config.root / "trading_agent.db"
@@ -39,9 +40,9 @@ def run_health(config: AppConfig, adapter: OKXAdapter) -> dict[str, Any]:
         required_tables = {"trade_plans", "order_lifecycle", "managed_positions", "trades"}
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if required_tables.issubset(tables):
-            checks["managed_position_semantics"] = "PASS"
-            checks["persistent_order_lifecycle"] = "PASS"
-            checks["idempotency"] = "PASS_CLIENT_ORDER_ID_AND_UNIQUE_PLAN_ID"
+            checks["managed_position_semantics"] = "SCHEMA_READY"
+            checks["persistent_order_lifecycle"] = "SCHEMA_READY"
+            checks["idempotency"] = "SCHEMA_READY_CLIENT_ORDER_ID_AND_UNIQUE_PLAN_ID"
         connection.close()
         checks["database"] = "PASS"
     except Exception as exc:
@@ -65,15 +66,17 @@ def run_health(config: AppConfig, adapter: OKXAdapter) -> dict[str, Any]:
     except Exception as exc:
         checks["account"] = f"FAIL:{exc}"
     if backend_status.available and backend_status.demo and checks["market_data"] == checks["account"] == "PASS":
-        checks["demo_execution"] = "READY_WITH_EXPLICIT_APPROVAL"
-    required = (
-        checks["configuration"], checks["database"], checks["market_data"], checks["account"],
-        checks["risk_engine"], checks["managed_position_semantics"], checks["persistent_order_lifecycle"],
+        checks["demo_execution"] = "READY_FOR_CONTROLLED_DEMO_VALIDATION"
+    core_ready = all(checks[name] == "PASS" for name in (
+        "configuration", "database", "market_data", "account",
+    )) and backend_status.available and backend_status.demo
+    execution_capable = bool(
+        core_ready and capabilities.get("client_order_id") and capabilities.get("attached_tp_sl")
     )
-    core_ready = all(value == "PASS" for value in required)
-    execution_ready = core_ready and capabilities.get("client_order_id") and capabilities.get("attached_tp_sl")
-    checks["system"] = (
-        "READY_FOR_FIRST_CONTROLLED_DEMO_ORDER" if execution_ready
-        else "READY_FOR_DEMO_DRY_RUN" if core_ready else "NOT_READY"
-    )
+    checks["system_capability"] = {
+        "status": "READY" if execution_capable else "PARTIALLY_READY" if core_ready else "NOT_READY",
+        "version": __version__,
+        "scope": "CORE_AND_CONTROLLED_DEMO_VALIDATION",
+    }
+    checks["system"] = checks["system_capability"]["status"]
     return checks

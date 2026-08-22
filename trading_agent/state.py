@@ -24,3 +24,11 @@ class AgentState:
         if mode is RuntimeMode.AUTO_DEMO and not self.auto_demo_enabled:
             raise PermissionError("AUTO_DEMO_DISABLED")
         self.runtime_mode = mode
+
+    @property
+    def allows_new_entries(self) -> bool:
+        return self.runtime_mode in {RuntimeMode.MANUAL_APPROVAL, RuntimeMode.AUTO_DEMO}
+
+    def require_new_entry_allowed(self) -> None:
+        if not self.allows_new_entries:
+            raise PermissionError("TRADING_STOPPED" if self.runtime_mode is RuntimeMode.STOPPED else "TRADING_NOT_EXECUTABLE")

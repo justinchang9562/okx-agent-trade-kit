@@ -42,13 +42,27 @@ contains no indicators. DemoExecutor rechecks the environment and backend Demo
 capability at the final boundary. Plan IDs are deterministic per symbol, side,
 strategy, and minute, providing retry deduplication.
 
-Core v0.2 persists `TradePlan -> OrderLifecycle -> ManagedPosition -> Trade` in
+Core v0.2.1 persists `TradePlan -> OrderLifecycle -> ManagedPosition -> Trade` in
 SQLite. Approval is only by `plan_id`; fresh data and risk are re-evaluated at
 approval. The lifecycle is committed before submission, and an uncertain
 transport result becomes `SUBMISSION_UNKNOWN` until client-order-ID
 reconciliation. Wallet assets remain account exposure and never become managed
-positions merely because their balances are non-zero.
+positions merely because their balances are non-zero. Submitted and otherwise
+reserved entry orders occupy position slots and projected notional before fill.
+Entry and protective-order identifiers link fill reconciliation to the eventual
+atomic `ManagedPosition`/trade/order `CLOSED` transition.
+
+Order transitions use optimistic compare-and-swap updates, preventing a stale
+worker from overwriting a newer state. Repository connections use WAL, bounded
+busy waits and per-repository reentrant locks. The shared MCP stdio client admits
+one request at a time with a timeout, so concurrent future control requests
+cannot cross-match JSON-RPC responses. Its stderr is drained continuously and
+discarded without logging content.
 
 `LocalControlAPI` is the future UI boundary. It exposes status, health, scan,
 analyze, pending-plan approval/rejection, positions, orders, trades, and stop.
 It does not expose MCP objects, order-manager internals, or credentials.
+Future Web handlers must call this facade and must not access the MCP process or
+SQLite connections directly. Health distinguishes durable system capability
+from current trading eligibility such as STOPPED, exposure limits, reserved
+slots, kill switches, unknown submissions and unprotected positions.

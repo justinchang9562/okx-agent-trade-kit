@@ -16,7 +16,15 @@ and algo-order queries. Capability presence is checked from `tools/list`; this
 does not claim that a protected Demo fill has been order-verified. A filled
 entry without a matching protection order is persisted as
 `POSITION_UNPROTECTED`. Transport failure after submission is never blindly
-retried: it is stored as `SUBMISSION_UNKNOWN` and reconciled first.
+retried: only failures that may have reached OKX are stored as
+`SUBMISSION_UNKNOWN` and reconciled first. Local guards and explicit upstream
+rejections become `PRE_SUBMIT_REJECTED`/`REJECTED`. Protective order IDs are
+persisted; linked sell fills close the managed position, trade and entry
+lifecycle atomically. This exit-fill path remains backend-data dependent.
+
+The stdio channel serializes requests with a bounded lock so future concurrent
+control calls cannot interleave writes or consume one another's response. A
+dedicated daemon drains stderr but retains and logs no stderr content.
 
 ## CLI — optional
 

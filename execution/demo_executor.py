@@ -4,21 +4,33 @@ from typing import Any
 
 from decision.trade_plan import TradePlan
 from execution.base_backend import BaseBackend
+from execution.errors import PreSubmitRejectedError
 
 
 class DemoExecutor:
-    def __init__(self, backend: BaseBackend) -> None:
+    def __init__(self, backend: BaseBackend, entry_guard: Any | None = None) -> None:
         self.backend = backend
+        self.entry_guard = entry_guard
+
+    def _require_entry_allowed(self) -> None:
+        if self.entry_guard is None:
+            return
+        try:
+            self.entry_guard()
+        except PermissionError as exc:
+            raise PreSubmitRejectedError(str(exc)) from exc
 
     def execute(self, plan: TradePlan) -> dict[str, Any]:
+        self._require_entry_allowed()
         status = self.backend.status()
         if plan.environment != "demo" or not status.available or not status.demo:
-            raise RuntimeError("DEMO_EXECUTION_GUARD_BLOCKED")
+            raise PreSubmitRejectedError("DEMO_EXECUTION_GUARD_BLOCKED")
         if plan.decision != "BUY" or not plan.risk_approved:
-            raise RuntimeError("PLAN_NOT_EXECUTABLE")
+            raise PreSubmitRejectedError("PLAN_NOT_EXECUTABLE")
         capabilities = self.backend.capabilities()
         if not capabilities.get("attached_tp_sl", False):
-            raise RuntimeError("TP_SL_BACKEND_NOT_SUPPORTED")
+            raise PreSubmitRejectedError("TP_SL_BACKEND_NOT_SUPPORTED")
+        self._require_entry_allowed()
         return self.backend.place_order({
             "instId": plan.symbol, "side": "buy", "ordType": "market",
             "sz": str(plan.position_size), "tdMode": "cash", "tgtCcy": "base_ccy",

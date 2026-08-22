@@ -36,7 +36,7 @@ def test_spread_missing_stop_rr_cooldown_and_stale(long_signal, market, account)
     manager = RiskManager(rules())
     assert manager.evaluate(long_signal, replace(market, bid=99, ask=101), account, DailyRiskState()).reason == "SPREAD_TOO_WIDE"
     assert manager.evaluate(replace(long_signal, suggested_stop=None), market, account, DailyRiskState()).reason == "MISSING_STOP_LOSS"
-    assert manager.evaluate(replace(long_signal, suggested_take_profit=long_signal.entry_price + 1), market, account, DailyRiskState()).reason == "INSUFFICIENT_RISK_REWARD"
+    assert manager.evaluate(replace(long_signal, suggested_take_profit=long_signal.entry_price + 1), market, account, DailyRiskState()).reason == "RISK_REWARD_BELOW_MINIMUM"
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     assert manager.evaluate(long_signal, market, account, DailyRiskState(last_trade_timestamp_ms=now)).reason == "COOLDOWN_ACTIVE"
     assert manager.evaluate(long_signal, replace(market, timestamp_ms=1), account, DailyRiskState()).reason == "STALE_DATA"

@@ -1,4 +1,4 @@
-# OKX Agent Trade Kit — Core v0.2
+# OKX Agent Trade Kit — Core v0.2.1
 
 A deterministic, minute-level spot scalping system whose current operating path
 uses the configured **OKX Demo Trade MCP**. It follows Path B: Codex is a control
@@ -68,7 +68,11 @@ with a configurable TTL. The only execution entry is `approve PLAN_ID`: without
 the exact confirmation it produces a fresh execution preview only. With exact
 confirmation it re-fetches market/account state and repeats stale-data, spread,
 exposure, daily-loss, consecutive-loss, duplicate, sizing, TTL, price-deviation
-and pre-submit-slippage guards before `OrderManager` can submit.
+and pre-submit-slippage guards before `OrderManager` can submit. The final ask,
+stop and take-profit are Decimal-quantized to OKX `tickSz`; final risk/reward,
+quantity and risk amount are recalculated from those executable prices. A
+`STOPPED` runtime blocks every new entry at both orchestration and final executor
+boundaries without removing existing protection orders.
 
 The backtest uses paginated, integrity-checked real OKX historical OHLCV with an
 ignored local cache, production indicators/strategy/risk/sizing, next-bar-open
@@ -80,8 +84,11 @@ walk-forward path reports rolling out-of-sample windows without parameter tuning
 
 SQLite `trading_agent.db` stores plans, persistent order transitions, managed
 positions, actual/unknown fill fees, signals and trades. Wallet inventory is not
-an Agent-managed position. `max_open_positions` counts only Agent-managed active
-lifecycles; wallet exposure is separately limited by `max_total_exposure_pct`.
+an Agent-managed position. `max_open_positions` counts Agent-managed active
+positions plus reserved entry lifecycles; reserved entry notional also contributes
+to projected exposure. Wallet exposure is separately limited by
+`max_total_exposure_pct`, and material unpriced assets block new entries as
+`EXPOSURE_UNKNOWN` rather than being valued at zero.
 Structured events are written to `logs/trading_agent.log`; neither runtime file
 is tracked.
 
@@ -91,7 +98,11 @@ minimum size, account exposure, managed positions, daily loss, consecutive
 losses, cooldown, duplicate plans, approval, Demo identity, and live gates.
 Submission uncertainty is persisted and reconciled by client order ID instead
 of being blindly retried. A filled entry without verified protection becomes
-`POSITION_UNPROTECTED`. Failures produce HOLD/REJECT and do not submit an order.
+`POSITION_UNPROTECTED`. Explicit local or exchange rejections are distinguished
+from may-have-reached-OKX failures. Lifecycle transitions use atomic state CAS;
+SQLite repositories and the MCP stdio channel serialize shared access with
+bounded waits. Health reports system capability separately from current trading
+eligibility. Failures produce HOLD/REJECT and do not submit an order.
 
 See [architecture](docs/architecture.md), [strategy](docs/strategy.md),
 [risk controls](docs/risk-management.md), [execution backends](docs/execution-backends.md),

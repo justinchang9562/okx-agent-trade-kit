@@ -40,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "health":
             result = orchestrator.get_health()
             _print(result)
-            return 0 if result["system"] in {"READY_FOR_DEMO_DRY_RUN", "READY_FOR_FIRST_CONTROLLED_DEMO_ORDER"} else 2
+            return 0 if result["system_capability"]["status"] == "READY" else 2
         elif args.command == "scan":
             _print(orchestrator.scan())
         elif args.command in {"analyze", "dry-run"}:

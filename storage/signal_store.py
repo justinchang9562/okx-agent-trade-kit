@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from decision.trade_plan import TradePlan
@@ -11,19 +12,22 @@ from strategies.signal import Signal
 class SignalStore:
     def __init__(self, path: Path) -> None:
         self.connection = connect(path)
+        self._lock = threading.RLock()
 
     def record(self, signal: Signal, plan: TradePlan) -> None:
-        self.connection.execute(
-            "INSERT INTO signals (timestamp_ms, symbol, score, confidence, signal_strength, decision, reasons_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (signal.timestamp_ms, signal.symbol, signal.score, signal.signal_strength,
-             signal.signal_strength, plan.decision, json.dumps(signal.reasons)),
-        )
-        if plan.decision == "REJECT":
+        with self._lock:
             self.connection.execute(
-                "INSERT INTO rejected_signals (timestamp_ms, symbol, reason, signal_score) VALUES (?, ?, ?, ?)",
-                (signal.timestamp_ms, signal.symbol, plan.risk_status, signal.score),
+                "INSERT INTO signals (timestamp_ms, symbol, score, confidence, signal_strength, decision, reasons_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (signal.timestamp_ms, signal.symbol, signal.score, signal.signal_strength,
+                 signal.signal_strength, plan.decision, json.dumps(signal.reasons)),
             )
-        self.connection.commit()
+            if plan.decision == "REJECT":
+                self.connection.execute(
+                    "INSERT INTO rejected_signals (timestamp_ms, symbol, reason, signal_score) VALUES (?, ?, ?, ?)",
+                    (signal.timestamp_ms, signal.symbol, plan.risk_status, signal.score),
+                )
+            self.connection.commit()
 
     def close(self) -> None:
-        self.connection.close()
+        with self._lock:
+            self.connection.close()

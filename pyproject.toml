@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "okx-agent-trade-kit"
-version = "0.1.0"
+version = "0.2.1"
 description = "Deterministic minute-level OKX Demo spot scalping agent"
 requires-python = ">=3.11"
 dependencies = ["PyYAML>=6.0.2,<7"]

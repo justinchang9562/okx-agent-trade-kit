@@ -7,6 +7,7 @@ import pytest
 from data.models import AccountSnapshot, Balance
 from decision.decision_engine import DecisionEngine
 from execution.base_backend import BackendStatus
+from execution.errors import SubmissionUncertainError
 from execution.order_manager import OrderManager
 from risk.exposure import build_exposure_snapshot
 from risk.position_sizing import SizingResult
@@ -28,11 +29,11 @@ class LifecycleBackend:
     def place_order(self, order):
         self.place_calls += 1
         client_id = order["clOrdId"]
-        if self.mode == "before_timeout":
-            raise RuntimeError("MCP_TIMEOUT")
+        if self.mode in {"before_timeout", "process_crash"}:
+            raise SubmissionUncertainError("MCP_TIMEOUT" if self.mode == "before_timeout" else "MCP_EXITED")
         if self.mode == "accepted_timeout":
             self.remote = {"ordId": "okx-1", "clOrdId": client_id, "state": "live", "accFillSz": "0"}
-            raise RuntimeError("MCP_TIMEOUT")
+            raise SubmissionUncertainError("MCP_TIMEOUT")
         return {"data": {"data": [{"ordId": "okx-1", "clOrdId": client_id, "sCode": "0"}]}}
     def get_order_by_client_id(self, symbol, client_order_id):
         if self.remote is None:
@@ -102,7 +103,7 @@ def test_partial_fill_is_not_filled(tmp_path, long_signal) -> None:
 
 @pytest.mark.parametrize("mode", ["before_timeout", "process_crash"])
 def test_transport_failure_never_blindly_retries(tmp_path, long_signal, mode) -> None:
-    backend = LifecycleBackend("before_timeout")
+    backend = LifecycleBackend(mode)
     plan, store, manager = setup_manager(tmp_path, long_signal, backend)
     with pytest.raises(RuntimeError, match="SUBMISSION_UNKNOWN"):
         manager.submit(plan, "CONFIRM DEMO ORDER")

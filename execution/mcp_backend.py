@@ -5,19 +5,17 @@ import os
 import select
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from execution.base_backend import BackendStatus, BaseBackend
+from execution.errors import PreSubmitRejectedError, SubmissionUncertainError
 
 
 class MCPError(RuntimeError):
     """Raised for fail-closed transport or upstream MCP tool failures."""
-
-
-class SubmissionUncertainError(MCPError):
-    """The request may have reached OKX; callers must reconcile and must not blindly retry."""
 
 
 class StdioMCPClient:
@@ -25,19 +23,31 @@ class StdioMCPClient:
         self.command = command
         self.timeout = timeout
         self._next_id = 1
+        self._request_lock = threading.Lock()
+        self._stderr_lines = 0
         self._process = subprocess.Popen(
             [command], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
         )
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
         try:
             self._request("initialize", {
                 "protocolVersion": "2025-06-18", "capabilities": {},
-                "clientInfo": {"name": "okx-agent-trade-kit", "version": "0.1.0"},
+                "clientInfo": {"name": "okx-agent-trade-kit", "version": "0.2.1"},
             })
             self._notify("notifications/initialized", {})
         except Exception:
             self.close()
             raise
+
+    def _drain_stderr(self) -> None:
+        """Continuously drain stderr without retaining or emitting possibly sensitive content."""
+        stream = self._process.stderr
+        if stream is None:
+            return
+        for _line in stream:
+            self._stderr_lines += 1
 
     def _write(self, message: dict[str, Any]) -> None:
         if not self._process.stdin:
@@ -51,8 +61,7 @@ class StdioMCPClient:
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
-                detail = self._process.stderr.read()[-500:] if self._process.stderr else ""
-                raise MCPError(f"MCP_EXITED:{self._process.returncode}:{detail}")
+                raise MCPError(f"MCP_EXITED:{self._process.returncode}:STDERR_LINES={self._stderr_lines}")
             ready, _, _ = select.select([self._process.stdout], [], [], min(0.25, deadline - time.monotonic()))
             if not ready:
                 continue
@@ -66,7 +75,8 @@ class StdioMCPClient:
             if message.get("id") != request_id:
                 continue
             if "error" in message:
-                raise MCPError(f"MCP_ERROR:{message['error']}")
+                error = message["error"] if isinstance(message["error"], dict) else {}
+                raise MCPError(f"MCP_ERROR:{error.get('code', 'UNKNOWN')}")
             result = message.get("result")
             if not isinstance(result, dict):
                 raise MCPError("MCP_INVALID_RESPONSE")
@@ -74,24 +84,32 @@ class StdioMCPClient:
         raise MCPError("MCP_TIMEOUT")
 
     def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        request_id = self._next_id
-        self._next_id += 1
-        self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
-        return self._read_response(request_id)
+        if not self._request_lock.acquire(timeout=self.timeout):
+            raise MCPError("MCP_CONCURRENT_REQUEST_TIMEOUT")
+        try:
+            request_id = self._next_id
+            self._next_id += 1
+            self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+            return self._read_response(request_id)
+        finally:
+            self._request_lock.release()
 
     def _notify(self, method: str, params: dict[str, Any]) -> None:
-        self._write({"jsonrpc": "2.0", "method": method, "params": params})
+        if not self._request_lock.acquire(timeout=self.timeout):
+            raise MCPError("MCP_CONCURRENT_REQUEST_TIMEOUT")
+        try:
+            self._write({"jsonrpc": "2.0", "method": method, "params": params})
+        finally:
+            self._request_lock.release()
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         result = self._request("tools/call", {"name": name, "arguments": arguments})
         if result.get("isError"):
-            content = result.get("content", [])
-            detail = content[0].get("text", "unknown") if content else "unknown"
-            raise MCPError(f"MCP_TOOL_ERROR:{name}:{detail}")
+            raise MCPError(f"MCP_TOOL_ERROR:{name}")
         structured = result.get("structuredContent")
         if isinstance(structured, dict):
             if structured.get("ok") is False:
-                raise MCPError(f"MCP_TOOL_FAILED:{name}:{structured}")
+                raise MCPError(f"MCP_TOOL_FAILED:{name}")
             return structured
         content = result.get("content", [])
         if content and isinstance(content[0], dict):
@@ -113,6 +131,8 @@ class StdioMCPClient:
                 self._process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 self._process.kill()
+        if hasattr(self, "_stderr_thread"):
+            self._stderr_thread.join(timeout=1)
 
 
 def discover_demo_mcp_command() -> str | None:
@@ -227,6 +247,10 @@ class MCPBackend(BaseBackend):
         try:
             return self._call("spot_place_order", order)
         except MCPError as exc:
+            if str(exc).startswith(("MCP_TOOL_ERROR", "MCP_TOOL_FAILED", "MCP_ERROR")):
+                raise PreSubmitRejectedError("EXCHANGE_EXPLICIT_REJECTION") from exc
+            if str(exc).startswith(("MCP_CONCURRENT_REQUEST_TIMEOUT", "OKX_DEMO_MCP_NOT_CONFIGURED")):
+                raise PreSubmitRejectedError("LOCAL_TRANSPORT_NOT_STARTED") from exc
             raise SubmissionUncertainError(str(exc)) from exc
 
     def cancel_order(self, symbol: str, order_id: str) -> dict[str, Any]:

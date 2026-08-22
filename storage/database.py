@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
+LATEST_SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY, applied_at_ms INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS signals (
   id INTEGER PRIMARY KEY, timestamp_ms INTEGER NOT NULL, symbol TEXT NOT NULL,
   score INTEGER NOT NULL, confidence REAL NOT NULL, decision TEXT NOT NULL,
@@ -43,6 +48,7 @@ CREATE TABLE IF NOT EXISTS managed_positions (
   plan_id TEXT PRIMARY KEY, order_id TEXT, symbol TEXT NOT NULL, quantity REAL NOT NULL,
   entry_price REAL, state TEXT NOT NULL, protection_state TEXT NOT NULL,
   opened_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, closed_at_ms INTEGER,
+  exit_order_id TEXT, protective_order_ids_json TEXT,
   FOREIGN KEY(plan_id) REFERENCES trade_plans(plan_id)
 );
 CREATE INDEX IF NOT EXISTS idx_managed_positions_state ON managed_positions(state);
@@ -55,6 +61,7 @@ CREATE TABLE IF NOT EXISTS trades (
   plan_id TEXT, order_id TEXT, entry_time_ms INTEGER, exit_time_ms INTEGER,
   entry_price REAL, exit_price REAL, quantity REAL, gross_pnl REAL,
   slippage_abs REAL, slippage_pct REAL, net_pnl REAL, fee_status TEXT DEFAULT 'UNKNOWN'
+  , exit_order_id TEXT
 );
 """
 
@@ -73,8 +80,11 @@ def _migrate(connection: sqlite3.Connection) -> None:
         "entry_price REAL", "exit_price REAL", "quantity REAL", "gross_pnl REAL",
         "slippage_abs REAL", "slippage_pct REAL", "net_pnl REAL",
         "fee_status TEXT DEFAULT 'UNKNOWN'",
+        "exit_order_id TEXT",
     ):
         _ensure_column(connection, "trades", definition)
+    for definition in ("exit_order_id TEXT", "protective_order_ids_json TEXT"):
+        _ensure_column(connection, "managed_positions", definition)
     connection.execute("UPDATE signals SET signal_strength = confidence WHERE signal_strength IS NULL")
     connection.execute(
         "UPDATE trades SET fee_status = CASE WHEN fees IS NULL THEN 'UNKNOWN' ELSE 'LEGACY_ESTIMATE' END "
@@ -83,14 +93,29 @@ def _migrate(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_plan_id ON trades(plan_id) WHERE plan_id IS NOT NULL"
     )
+    applied_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES (1, ?)",
+        (applied_at_ms,),
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES (?, ?)",
+        (LATEST_SCHEMA_VERSION, applied_at_ms),
+    )
+
+
+def schema_version(connection: sqlite3.Connection) -> int:
+    row = connection.execute("SELECT COALESCE(MAX(version), 0) version FROM schema_migrations").fetchone()
+    return int(row["version"])
 
 
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, timeout=10)
+    connection = sqlite3.connect(path, timeout=10, check_same_thread=False)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA synchronous = FULL")
+    connection.execute("PRAGMA busy_timeout = 10000")
     connection.executescript(SCHEMA)
     _migrate(connection)
     connection.commit()

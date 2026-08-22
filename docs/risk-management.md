@@ -5,11 +5,14 @@ environment, signal type/score/signal strength, fresh data, account availability
 spread, stop, target, risk/reward, duplicates, daily loss, consecutive losses,
 managed open positions, total wallet/account exposure, and cooldown.
 
-`max_open_positions` never counts a non-zero wallet balance. It counts rows
-created by this Agent that are still `PARTIALLY_FILLED`, `FILLED`, or
-`POSITION_UNPROTECTED`. Existing spot inventory is instead valued independently
-against `max_total_exposure_pct`; configured assets that cannot be priced are
-reported as unpriced rather than assigned an invented price.
+`max_open_positions` never counts a non-zero wallet balance. The unified
+`position_slots_in_use()` count includes Agent-managed active positions and
+reserved entry lifecycles (`APPROVED`, `SUBMITTED`, `SUBMISSION_UNKNOWN`, `OPEN`,
+`PARTIALLY_FILLED`, and filled/unprotected entries), deduplicated by plan.
+Reserved remaining notional is included in projected exposure. Existing spot
+inventory is valued independently against `max_total_exposure_pct`; material
+assets that cannot be priced set exposure to `UNKNOWN` and block new entries.
+Only balances at or below the configured quantity dust threshold are ignored.
 
 Position sizing risks `equity * risk_per_trade` across the entry-stop distance,
 then caps notional by `max_position_pct` and available USDT. Quantity is floored

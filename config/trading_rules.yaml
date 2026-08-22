@@ -18,6 +18,7 @@ risk:
   max_daily_loss_pct: 0.03
   max_consecutive_losses: 3
   max_open_positions: 2
+  unpriced_asset_dust_quantity: 0.00000001
 
 trade:
   minimum_risk_reward: 1.5

@@ -5,6 +5,7 @@ from typing import Any
 
 from decision.trade_plan import TradePlan
 from execution.demo_executor import DemoExecutor
+from execution.errors import PreSubmitRejectedError, SubmissionUncertainError
 from execution.order_state import OrderState
 from storage.trade_store import now_ms
 
@@ -66,7 +67,13 @@ class OrderManager:
         )
         try:
             result = self.executor.execute(plan)
-        except Exception as exc:
+        except PreSubmitRejectedError as exc:
+            self.store.transition_order(
+                plan.plan_id, OrderState.REJECTED.value,
+                last_error=f"PRE_SUBMIT_REJECTED:{str(exc)}",
+            )
+            raise RuntimeError("PRE_SUBMIT_REJECTED") from exc
+        except (SubmissionUncertainError, TimeoutError, ConnectionError) as exc:
             self.store.transition_order(
                 plan.plan_id, OrderState.SUBMISSION_UNKNOWN.value, last_error=type(exc).__name__
             )
@@ -74,6 +81,12 @@ class OrderManager:
             if reconciled.get("found"):
                 return reconciled
             raise RuntimeError("SUBMISSION_UNKNOWN_RECONCILIATION_REQUIRED") from exc
+        except Exception as exc:
+            self.store.transition_order(
+                plan.plan_id, OrderState.REJECTED.value,
+                last_error=f"PRE_SUBMIT_REJECTED:{type(exc).__name__}",
+            )
+            raise RuntimeError("PRE_SUBMIT_REJECTED") from exc
         row = _rows(result)[0] if _rows(result) else {}
         if str(row.get("sCode", "0")) not in {"", "0"}:
             self.store.transition_order(
@@ -108,7 +121,7 @@ class OrderManager:
             fields["filled_at_ms"] = now_ms()
         self.store.transition_order(local["plan_id"], state, **fields)
         if state in {OrderState.PARTIALLY_FILLED.value, OrderState.FILLED.value}:
-            protection = self._protection_state(local, order_id)
+            protection, protective_order_ids = self._protection_state(local, order_id)
             final_state = state
             if state == OrderState.FILLED.value and protection != "PROTECTED":
                 final_state = OrderState.POSITION_UNPROTECTED.value
@@ -120,7 +133,7 @@ class OrderManager:
                 self.store.transition_order(local["plan_id"], state, protection_state=protection)
             self.store.upsert_managed_position(
                 local["plan_id"], order_id, local["symbol"], filled, average,
-                final_state, protection,
+                final_state, protection, protective_order_ids,
             )
             state = final_state
         self._backfill_fill_data(local, order_id)
@@ -135,18 +148,22 @@ class OrderManager:
         return {"found": True, "plan_id": local["plan_id"], "state": state,
                 "filled_size": filled, "average_fill_price": average, "okx_order_id": order_id}
 
-    def _protection_state(self, local: dict[str, Any], order_id: str | None) -> str:
+    def _protection_state(self, local: dict[str, Any], order_id: str | None) -> tuple[str, list[str]]:
         try:
             rows = _rows(self.executor.backend.get_protection_orders(local["symbol"]))
         except (NotImplementedError, RuntimeError):
-            return "TP_SL_BACKEND_NOT_SUPPORTED"
+            return "TP_SL_BACKEND_NOT_SUPPORTED", []
         client_id = local["client_order_id"]
-        protected = any(
+        matching = [row for row in rows if (
             str(row.get("ordId") or row.get("attachAlgoId") or "") == str(order_id or "")
             or str(row.get("clOrdId") or row.get("algoClOrdId") or "") == client_id
-            for row in rows
-        )
-        return "PROTECTED" if protected else "PROTECTION_NOT_FOUND"
+        )]
+        identifiers = sorted({
+            str(row.get("algoId") or row.get("attachAlgoId") or row.get("ordId") or "")
+            for row in matching
+            if row.get("algoId") or row.get("attachAlgoId") or row.get("ordId")
+        })
+        return ("PROTECTED" if matching else "PROTECTION_NOT_FOUND"), identifiers
 
     def _backfill_fill_data(self, local: dict[str, Any], order_id: str | None) -> None:
         if not order_id:
@@ -183,7 +200,52 @@ class OrderManager:
         return self._apply_remote_order(local, rows[0])
 
     def recover_active_orders(self) -> list[dict[str, Any]]:
-        return [self.reconcile_plan(order["plan_id"]) for order in self.store.active_orders()]
+        recovered = [self.reconcile_plan(order["plan_id"]) for order in self.store.active_orders()]
+        recovered.extend(self.reconcile_managed_positions())
+        return recovered
+
+    def reconcile_managed_positions(self) -> list[dict[str, Any]]:
+        """Close managed positions only from fills linked to persisted protective order IDs."""
+        results: list[dict[str, Any]] = []
+        for position in self.store.managed_positions():
+            try:
+                protective_ids = set(json.loads(position.protective_order_ids_json or "[]"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                protective_ids = set()
+            if not protective_ids:
+                results.append({"plan_id": position.plan_id, "found": False,
+                                "reason": "PROTECTIVE_ORDER_LINK_UNAVAILABLE"})
+                continue
+            try:
+                fills = [row for row in _rows(self.executor.backend.get_fills(position.symbol))
+                         if str(row.get("side", "")).lower() == "sell"
+                         and str(row.get("ordId") or row.get("algoId") or "") in protective_ids]
+            except Exception:
+                results.append({"plan_id": position.plan_id, "found": False,
+                                "reason": "EXIT_FILL_DATA_UNAVAILABLE"})
+                continue
+            quantity = sum(float(row.get("fillSz") or row.get("sz") or 0) for row in fills)
+            if quantity + 1e-12 < position.quantity:
+                results.append({"plan_id": position.plan_id, "found": bool(fills),
+                                "state": "EXIT_PARTIALLY_FILLED" if fills else position.state,
+                                "filled_size": quantity})
+                continue
+            weighted = sum(
+                float(row.get("fillPx") or row.get("px") or 0)
+                * float(row.get("fillSz") or row.get("sz") or 0) for row in fills
+            )
+            exit_price = weighted / quantity if quantity > 0 else 0
+            fee_values = [row.get("fee") for row in fills]
+            exit_fees = (
+                sum(float(value) for value in fee_values)
+                if fee_values and all(value not in (None, "") for value in fee_values) else None
+            )
+            timestamps = [int(row.get("fillTime") or row.get("ts") or now_ms()) for row in fills]
+            exit_order_id = str(fills[-1].get("ordId") or fills[-1].get("algoId") or "") or None
+            self.store.close_trade(position.plan_id, max(timestamps), exit_price, exit_fees, exit_order_id)
+            results.append({"plan_id": position.plan_id, "found": True,
+                            "state": OrderState.CLOSED.value, "exit_order_id": exit_order_id})
+        return results
 
     def query(self, symbol: str, order_id: str) -> dict[str, Any]:
         return self.executor.backend.get_order(symbol, order_id)

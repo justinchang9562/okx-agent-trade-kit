@@ -47,9 +47,6 @@ class RiskManager:
             return RiskDecision(False, "MISSING_TAKE_PROFIT")
         if signal.entry_price <= signal.suggested_stop:
             return RiskDecision(False, "INVALID_STOP_LOSS")
-        actual_rr = (signal.suggested_take_profit - signal.entry_price) / (signal.entry_price - signal.suggested_stop)
-        if actual_rr + 1e-9 < float(self.rules["trade"]["minimum_risk_reward"]):
-            return RiskDecision(False, "INSUFFICIENT_RISK_REWARD")
         if market.spread_pct > float(self.rules["scalping"]["max_spread_pct"]):
             return RiskDecision(False, "SPREAD_TOO_WIDE")
         if signal.score < int(self.rules["scalping"]["minimum_signal_score"]):
@@ -66,9 +63,15 @@ class RiskManager:
             return RiskDecision(False, "MAX_CONSECUTIVE_LOSSES_REACHED")
         if state.open_position_count >= int(risk_rules["max_open_positions"]):
             return RiskDecision(False, "MAX_OPEN_POSITIONS_REACHED")
-        if exposure is not None and exposure.total_exposure_pct > float(risk_rules.get("max_total_exposure_pct", 1.0)):
-            return RiskDecision(False, "MAX_TOTAL_EXPOSURE_REACHED")
+        if exposure is not None:
+            if exposure.status == "UNKNOWN" or exposure.unpriced_currencies:
+                return RiskDecision(False, "EXPOSURE_UNKNOWN")
+            if exposure.total_exposure_pct > float(risk_rules.get("max_total_exposure_pct", 1.0)):
+                return RiskDecision(False, "MAX_TOTAL_EXPOSURE_REACHED")
         cooldown_ms = int(self.rules["scalping"]["cooldown_seconds"]) * 1000
         if state.last_trade_timestamp_ms and now_ms - state.last_trade_timestamp_ms < cooldown_ms:
             return RiskDecision(False, "COOLDOWN_ACTIVE")
+        actual_rr = (signal.suggested_take_profit - signal.entry_price) / (signal.entry_price - signal.suggested_stop)
+        if actual_rr + 1e-9 < float(self.rules["trade"]["minimum_risk_reward"]):
+            return RiskDecision(False, "RISK_REWARD_BELOW_MINIMUM")
         return RiskDecision(True, "PASS")
