@@ -22,4 +22,8 @@ class LocalControlAPI:
     def get_positions(self) -> dict[str, Any]: return self.agent.positions()
     def get_orders(self) -> dict[str, Any]: return self.agent.orders()
     def get_trades(self) -> list[dict[str, Any]]: return self.agent.get_trades()
+    def get_account(self) -> dict[str, Any]: return self.agent.account()
+    def get_signals(self, limit: int = 200) -> list[dict[str, Any]]: return self.agent.get_signals(limit)
+    def get_trade_plans(self, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        return self.agent.get_trade_plans(status, limit)
     def stop_trading(self) -> dict[str, str]: return self.agent.stop_trading()

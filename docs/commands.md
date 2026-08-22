@@ -18,5 +18,16 @@
 - `walk-forward SYMBOL --days {7,30,90}`: rolling out-of-sample evaluation.
 
 Use `python -m trading_agent ...` or `uv run python -m trading_agent ...`.
-Forward testing is intentionally disabled; a future scheduler must call this
-same orchestrator and retain explicit automation policy and kill switches.
+
+The local Web Dashboard and API use:
+
+- `uv run python -m trading_agent.web_server`: build the frontend if needed,
+  then serve Dashboard and API on `http://127.0.0.1:8000` with one authoritative
+  Core worker.
+- `uv run python -m trading_agent.web_server --rebuild-frontend`: force a fresh
+  production frontend build before starting.
+
+AUTO DEMO is implemented through the Web runtime but is disabled on every
+startup and requires its exact enable phrase, an authenticated fresh WebSocket,
+Agent RUNNING and execution ARMED. It does not weaken the normal TradePlan,
+revalidation, Risk Manager, idempotency or DemoExecutor path. Live is locked.

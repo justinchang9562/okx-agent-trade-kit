@@ -3,20 +3,25 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any
-from functools import wraps
 
 from decision.trade_plan import TradePlan
-from execution.order_state import ACTIVE_ORDER_STATES, ALLOWED_TRANSITIONS, MANAGED_POSITION_STATES, OrderState
 from execution.errors import StateChangedError
+from execution.order_state import (
+    ACTIVE_ORDER_STATES,
+    ALLOWED_TRANSITIONS,
+    MANAGED_POSITION_STATES,
+    OrderState,
+)
 from risk.daily_limits import DailyRiskState
 from storage.database import connect
 
 
 def now_ms() -> int:
-    return int(datetime.now(timezone.utc).timestamp() * 1000)
+    return int(datetime.now(UTC).timestamp() * 1000)
 
 
 def synchronized(method):
@@ -97,6 +102,33 @@ class TradeStore:
             "WHERE status = ? ORDER BY created_at_ms", (OrderState.PLANNED.value,)
         ).fetchall()
         return [dict(row) for row in rows]
+
+    @synchronized
+    def list_plans(self, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 1000))
+        if status:
+            rows = self.connection.execute(
+                "SELECT * FROM trade_plans WHERE status = ? ORDER BY created_at_ms DESC LIMIT ?",
+                (status, safe_limit),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM trade_plans ORDER BY created_at_ms DESC LIMIT ?",
+                (safe_limit,),
+            ).fetchall()
+        output: list[dict[str, Any]] = []
+        current = now_ms()
+        for row in rows:
+            item = dict(row)
+            plan = json.loads(item.pop("plan_json"))
+            core_status = item["status"]
+            ui_status = core_status
+            if core_status == OrderState.PLANNED.value:
+                ui_status = "EXPIRED" if int(item["expires_at_ms"]) <= current else "PENDING_APPROVAL"
+            elif core_status == OrderState.REJECTED.value and item.get("rejection_reason") == "PLAN_EXPIRED":
+                ui_status = "EXPIRED"
+            output.append(plan | item | {"ui_status": ui_status})
+        return output
 
     @synchronized
     def transition_plan(self, plan_id: str, expected: set[str], state: str, reason: str | None = None) -> bool:
@@ -303,8 +335,8 @@ class TradeStore:
 
     @synchronized
     def daily_state(self, open_position_count: int | None = None) -> DailyRiskState:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        start_ms = int(datetime.fromisoformat(today).replace(tzinfo=timezone.utc).timestamp() * 1000)
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        start_ms = int(datetime.fromisoformat(today).replace(tzinfo=UTC).timestamp() * 1000)
         rows = self.connection.execute(
             "SELECT COALESCE(exit_time_ms, timestamp_ms) timestamp_ms, COALESCE(net_pnl, pnl) pnl "
             "FROM trades WHERE COALESCE(exit_time_ms, timestamp_ms) >= ? "

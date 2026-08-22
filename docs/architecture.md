@@ -62,7 +62,24 @@ discarded without logging content.
 `LocalControlAPI` is the future UI boundary. It exposes status, health, scan,
 analyze, pending-plan approval/rejection, positions, orders, trades, and stop.
 It does not expose MCP objects, order-manager internals, or credentials.
-Future Web handlers must call this facade and must not access the MCP process or
-SQLite connections directly. Health distinguishes durable system capability
+Web handlers call this facade through `TradingService` and do not access the MCP
+process or SQLite connections directly. Health distinguishes durable system capability
 from current trading eligibility such as STOPPED, exposure limits, reserved
 slots, kill switches, unknown submissions and unprotected positions.
+
+The W0-W7 local Web control plane is an additional client boundary, not a new
+trading engine:
+
+```text
+React / TypeScript / Vite (localhost browser)
+        | same-origin session + CSRF + authenticated read-only WebSocket
+FastAPI /api/v1 (127.0.0.1, one process / one worker)
+        |
+TradingService (compatibility state, scheduler, audit, one-thread executor)
+        |
+LocalControlAPI -> one authoritative TradingOrchestrator -> existing Core
+```
+
+Scheduler reconciliation, AUTO approval and backtests use the same serialized
+Core worker. Browser state is a projection; Core TradePlan/order/managed-position
+rows remain authoritative. See [API/WebSocket v1](web-dashboard-api-v1.md).

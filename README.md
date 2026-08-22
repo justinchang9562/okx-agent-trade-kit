@@ -32,6 +32,7 @@ Python 3.11+ is required. Using the already-installed `uv`:
 
 ```bash
 uv sync --extra dev
+cd frontend && npm ci && npm run build && cd ..
 ```
 
 Core configuration is in `config/trading_rules.yaml`, `config/symbols.yaml`, and
@@ -61,6 +62,35 @@ uv run python -m trading_agent backtest BTC-USDT --days 30
 uv run python -m trading_agent walk-forward BTC-USDT --days 7
 uv run pytest
 ```
+
+## Local Web Dashboard v2.1
+
+After the one-time install above, one local command starts both the API and the
+built dashboard:
+
+```bash
+uv run python -m trading_agent.web_server
+```
+
+Open `http://127.0.0.1:8000`. The supported server binds only to loopback and
+uses one process/worker with one authoritative `TradingOrchestrator`. If the
+frontend build is missing, the command builds it first; use
+`uv run python -m trading_agent.web_server --rebuild-frontend` after frontend
+source changes.
+
+The page exposes health, account/exposure, Scanner, Signals, TradePlans, Orders,
+Positions, Trades, Backtest/Walk-Forward, redacted logs, settings and an audited
+control surface. Demo execution starts `DISARMED` after every backend restart.
+ARM, Agent start, AUTO and approval require an authenticated, fresh WebSocket;
+disconnect/staleness fails closed. Approval accepts only a persisted `plan_id`
+and invokes the existing full Core revalidation path. AUTO DEMO requires an
+explicit phrase, is disabled by default and is never restored on restart. The
+Kill Switch stops new entries/AUTO and disarms without removing existing TP/SL
+protection.
+
+Live remains `LIVE_NOT_CONFIGURED / LOCKED`; W8 is not implemented. See
+[Web Dashboard compatibility](docs/web-dashboard-compatibility.md) and
+[API/WebSocket v1](docs/web-dashboard-api-v1.md).
 
 `dry-run` retrieves fresh Demo data and account state, calculates the complete
 plan, and never calls order submission. `analyze` persists an executable plan

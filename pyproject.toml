@@ -7,10 +7,15 @@ name = "okx-agent-trade-kit"
 version = "0.2.1"
 description = "Deterministic minute-level OKX Demo spot scalping agent"
 requires-python = ">=3.11"
-dependencies = ["PyYAML>=6.0.2,<7"]
+dependencies = [
+  "fastapi>=0.116,<1",
+  "PyYAML>=6.0.2,<7",
+  "uvicorn>=0.35,<1",
+  "websockets>=15,<17",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3,<10", "pytest-cov>=6,<8"]
+dev = ["httpx>=0.28,<1", "pytest>=8.3,<10", "pytest-asyncio>=1.1,<2", "pytest-cov>=6,<8"]
 
 [project.scripts]
 okx-agent = "trading_agent.cli:main"

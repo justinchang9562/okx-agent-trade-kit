@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from typing import Any
 
 from decision.trade_plan import TradePlan
 from storage.database import connect
@@ -27,6 +28,16 @@ class SignalStore:
                     (signal.timestamp_ms, signal.symbol, plan.risk_status, signal.score),
                 )
             self.connection.commit()
+
+    def list_signals(self, limit: int = 200) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 1000))
+        with self._lock:
+            rows = self.connection.execute(
+                """SELECT timestamp_ms, symbol, score, signal_strength, decision, reasons_json
+                     FROM signals ORDER BY timestamp_ms DESC, id DESC LIMIT ?""",
+                (safe_limit,),
+            ).fetchall()
+        return [dict(row) | {"reasons": json.loads(row["reasons_json"])} for row in rows]
 
     def close(self) -> None:
         with self._lock:

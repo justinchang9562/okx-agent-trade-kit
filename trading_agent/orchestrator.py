@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from data.account_data import AccountDataService
@@ -15,8 +15,8 @@ from execution.order_manager import EXPLICIT_APPROVALS, OrderManager
 from execution.order_state import OrderState
 from monitoring.health import run_health
 from monitoring.logger import configure_logging, log_event
-from risk.exposure import ExposureSnapshot, build_exposure_snapshot
 from risk.daily_limits import daily_loss_reached
+from risk.exposure import ExposureSnapshot, build_exposure_snapshot
 from risk.position_sizing import SizingResult, calculate_position_size
 from risk.price_quantization import quantize_long_execution_prices, risk_reward
 from risk.risk_manager import RiskDecision, RiskManager
@@ -28,7 +28,7 @@ from trading_agent.state import AgentState, RuntimeMode
 
 
 def _now_ms() -> int:
-    return int(datetime.now(timezone.utc).timestamp() * 1000)
+    return int(datetime.now(UTC).timestamp() * 1000)
 
 
 def _ticker_price(payload: dict[str, Any]) -> float | None:
@@ -287,6 +287,30 @@ class TradingOrchestrator:
     def get_trades(self) -> list[dict[str, Any]]:
         return self.trade_store.get_trades()
 
+    def get_trade_plans(self, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        return self.trade_store.list_plans(status=status, limit=limit)
+
+    def get_signals(self, limit: int = 200) -> list[dict[str, Any]]:
+        return self.signal_store.list_signals(limit=limit)
+
+    def account(self) -> dict[str, Any]:
+        account = self.account_data.get_snapshot()
+        try:
+            market = self.market_data.get_snapshot(self.config.symbols[0])
+            exposure: dict[str, Any] | str = asdict(self._exposure(account, market))
+        except Exception:
+            exposure = "DATA_UNAVAILABLE"
+        return {
+            "timestamp_ms": account.timestamp_ms,
+            "equity_usdt": account.equity_usdt,
+            "available_usdt": account.available_usdt,
+            "daily_pnl": account.daily_pnl,
+            "wallet_balances": [asdict(balance) for balance in account.balances],
+            "open_order_count": len(account.open_orders),
+            "fill_count": len(account.fills),
+            "exposure": exposure,
+        }
+
     def get_status(self) -> dict[str, Any]:
         return {
             "environment": self.config.environment, "backend": self.config.backend,
@@ -302,17 +326,21 @@ class TradingOrchestrator:
 
     def get_health(self) -> dict[str, Any]:
         health = run_health(self.config, self.adapter)
-        reason = "ELIGIBLE"
+        blocking_reasons: list[str] = []
         details: dict[str, Any] = {}
         if health["system_capability"]["status"] != "READY":
-            reason = "SYSTEM_CAPABILITY_NOT_READY"
-        elif not self.state.allows_new_entries:
-            reason = "TRADING_STOPPED"
-        elif any(order["state"] == OrderState.SUBMISSION_UNKNOWN.value for order in self.trade_store.get_orders()):
-            reason = "SUBMISSION_UNKNOWN_REQUIRES_RECONCILIATION"
-        elif any(position.protection_state != "PROTECTED" for position in self.trade_store.managed_positions()):
-            reason = "POSITION_UNPROTECTED"
-        else:
+            blocking_reasons.append("SYSTEM_CAPABILITY_NOT_READY")
+        if self.state.kill_switch_active:
+            blocking_reasons.append("KILL_SWITCH_ACTIVE")
+        if not self.state.execution_armed:
+            blocking_reasons.append("EXECUTION_DISARMED")
+        if self.state.runtime_mode not in {RuntimeMode.MANUAL_APPROVAL, RuntimeMode.AUTO_DEMO}:
+            blocking_reasons.append("TRADING_STOPPED")
+        if any(order["state"] == OrderState.SUBMISSION_UNKNOWN.value for order in self.trade_store.get_orders()):
+            blocking_reasons.append("SUBMISSION_UNKNOWN_REQUIRES_RECONCILIATION")
+        if any(position.protection_state != "PROTECTED" for position in self.trade_store.managed_positions()):
+            blocking_reasons.append("POSITION_UNPROTECTED")
+        if health["system_capability"]["status"] == "READY":
             try:
                 market = self.market_data.get_snapshot(self.config.symbols[0])
                 account = self.account_data.get_snapshot(self.config.symbols[0])
@@ -325,25 +353,28 @@ class TradingOrchestrator:
                     "exposure": asdict(exposure),
                 }
                 if market.spread_pct > float(self.config.rules["scalping"]["max_spread_pct"]):
-                    reason = "SPREAD_TOO_WIDE"
-                elif daily_loss_reached(
+                    blocking_reasons.append("SPREAD_TOO_WIDE")
+                if daily_loss_reached(
                     account.equity_usdt, state,
                     float(self.config.rules["risk"]["max_daily_loss_pct"]),
                 ):
-                    reason = "DAILY_KILL_SWITCH_ACTIVE"
-                elif state.consecutive_losses >= int(self.config.rules["risk"]["max_consecutive_losses"]):
-                    reason = "MAX_CONSECUTIVE_LOSSES_REACHED"
-                elif slots >= int(self.config.rules["risk"]["max_open_positions"]):
-                    reason = "MAX_OPEN_POSITIONS_REACHED"
-                elif exposure.status == "UNKNOWN":
-                    reason = "EXPOSURE_UNKNOWN"
-                elif exposure.total_exposure_pct > float(self.config.rules["risk"]["max_total_exposure_pct"]):
-                    reason = "MAX_TOTAL_EXPOSURE_REACHED"
+                    blocking_reasons.append("DAILY_KILL_SWITCH_ACTIVE")
+                if state.consecutive_losses >= int(self.config.rules["risk"]["max_consecutive_losses"]):
+                    blocking_reasons.append("MAX_CONSECUTIVE_LOSSES_REACHED")
+                if slots >= int(self.config.rules["risk"]["max_open_positions"]):
+                    blocking_reasons.append("MAX_OPEN_POSITIONS_REACHED")
+                if exposure.status == "UNKNOWN":
+                    blocking_reasons.append("EXPOSURE_UNKNOWN")
+                if exposure.total_exposure_pct > float(self.config.rules["risk"]["max_total_exposure_pct"]):
+                    blocking_reasons.append("MAX_TOTAL_EXPOSURE_REACHED")
             except Exception as exc:
-                reason = "DATA_UNAVAILABLE"
+                blocking_reasons.append("DATA_UNAVAILABLE")
                 details = {"error_type": type(exc).__name__}
+        blocking_reasons = list(dict.fromkeys(blocking_reasons))
+        reason = blocking_reasons[0] if blocking_reasons else "ELIGIBLE"
         health["trading_eligibility"] = {
-            "eligible": reason == "ELIGIBLE", "reason": reason, **details,
+            "eligible": not blocking_reasons, "reason": reason,
+            "blocking_reasons": blocking_reasons, **details,
         }
         health["live_trading"] = "LOCKED_NOT_IMPLEMENTED"
         return health
@@ -357,7 +388,7 @@ class TradingOrchestrator:
         self.signal_store.close()
         self.adapter.close()
 
-    def __enter__(self) -> "TradingOrchestrator":
+    def __enter__(self) -> TradingOrchestrator:
         return self
 
     def __exit__(self, *args: object) -> None:

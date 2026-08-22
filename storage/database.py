@@ -1,16 +1,39 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY, applied_at_ms INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS control_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  environment TEXT NOT NULL,
+  live_setup_state TEXT NOT NULL,
+  execution_state TEXT NOT NULL,
+  agent_runtime_state TEXT NOT NULL,
+  trading_mode TEXT NOT NULL,
+  connection_state TEXT NOT NULL,
+  kill_switch_active INTEGER NOT NULL DEFAULT 0,
+  auto_demo_enabled INTEGER NOT NULL DEFAULT 0,
+  scan_interval_seconds REAL NOT NULL DEFAULT 15,
+  updated_at_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS control_audit_log (
+  id INTEGER PRIMARY KEY,
+  timestamp_ms INTEGER NOT NULL,
+  actor TEXT NOT NULL,
+  requested_action TEXT NOT NULL,
+  previous_state_json TEXT NOT NULL,
+  result_state_json TEXT NOT NULL,
+  reason TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_control_audit_timestamp ON control_audit_log(timestamp_ms);
 CREATE TABLE IF NOT EXISTS signals (
   id INTEGER PRIMARY KEY, timestamp_ms INTEGER NOT NULL, symbol TEXT NOT NULL,
   score INTEGER NOT NULL, confidence REAL NOT NULL, decision TEXT NOT NULL,
@@ -93,15 +116,12 @@ def _migrate(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_plan_id ON trades(plan_id) WHERE plan_id IS NOT NULL"
     )
-    applied_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    connection.execute(
-        "INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES (1, ?)",
-        (applied_at_ms,),
-    )
-    connection.execute(
-        "INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES (?, ?)",
-        (LATEST_SCHEMA_VERSION, applied_at_ms),
-    )
+    applied_at_ms = int(datetime.now(UTC).timestamp() * 1000)
+    for version in range(1, LATEST_SCHEMA_VERSION + 1):
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at_ms) VALUES (?, ?)",
+            (version, applied_at_ms),
+        )
 
 
 def schema_version(connection: sqlite3.Connection) -> int:
