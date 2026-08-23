@@ -7,6 +7,7 @@ import {
   FlattenDialog,
   GenericTable,
   MarketSignals,
+  marketStreamState,
   ObjectView,
   OrderLifecycle,
   OverviewMetrics,
@@ -33,9 +34,9 @@ const control: ControlState = {
 
 const market = {
   symbols: {
-    'BTC-USDT': { symbol: 'BTC-USDT', stream_state: 'REALTIME', last_price: 76_241, confirmed_candle_timestamps: { '1m': 1_787_467_140_000, '3m': 1_787_467_080_000, '5m': 1_787_466_900_000 } },
-    'ETH-USDT': { symbol: 'ETH-USDT', stream_state: 'REALTIME', last_price: 2_400, confirmed_candle_timestamps: { '1m': 1_787_467_140_000 } },
-    'SOL-USDT': { symbol: 'SOL-USDT', stream_state: 'REALTIME', last_price: 92, confirmed_candle_timestamps: { '1m': 1_787_467_140_000 } },
+    'BTC-USDT': { symbol: 'BTC-USDT', stream_state: 'CONNECTED', last_price: 76_241, confirmed_candle_timestamps: { '1m': 1_787_467_140_000, '3m': 1_787_467_080_000, '5m': 1_787_466_900_000 } },
+    'ETH-USDT': { symbol: 'ETH-USDT', stream_state: 'CONNECTED', last_price: 2_400, confirmed_candle_timestamps: { '1m': 1_787_467_140_000 } },
+    'SOL-USDT': { symbol: 'SOL-USDT', stream_state: 'CONNECTED', last_price: 92, confirmed_candle_timestamps: { '1m': 1_787_467_140_000 } },
   },
   metrics: { market_latency_current_ms: 120, confirmed_candle_timestamp: 1_787_467_140_000 },
 }
@@ -173,6 +174,12 @@ describe('risk and lifecycle states', () => {
 })
 
 describe('market, exposure, and ownership pages', () => {
+  it('maps the backend CONNECTED market stream state without requiring AUTO mode', () => {
+    expect(marketStreamState(market)).toBe('CONNECTED')
+    expect(marketStreamState({ symbols: { 'BTC-USDT': { stream_state: 'STALE' } } })).toBe('STALE')
+    expect(marketStreamState({ symbols: {} })).toBe('DISCONNECTED')
+  })
+
   it('shows readable BTC, ETH, and SOL status cards without object coercion', () => {
     const data: DashboardData = { ...({} as DashboardData), signals: [], plans: [], fills: [], trades: [], logs: [], audit: [], market, settings: { symbols: ['BTC-USDT', 'ETH-USDT', 'SOL-USDT'] }, scanner: {} }
     const html = renderToStaticMarkup(<MarketSignals data={data} language="zh" />)

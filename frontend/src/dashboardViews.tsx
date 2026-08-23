@@ -28,6 +28,15 @@ function records(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.map(asRecord) : []
 }
 
+export function marketStreamState(market: Record<string, unknown>): string {
+  const states = records(Object.values(asRecord(market.symbols)))
+    .map((item) => String(item.stream_state ?? 'DISCONNECTED'))
+  if (states.length && states.every((item) => item === 'CONNECTED')) return 'CONNECTED'
+  if (states.some((item) => item === 'RESYNCING')) return 'RESYNCING'
+  if (states.some((item) => item === 'STALE')) return 'STALE'
+  return 'DISCONNECTED'
+}
+
 export function Panel({
   title, eyebrow, children, actions, className = '',
 }: {
@@ -163,12 +172,7 @@ export function SessionControlCard({
   const flattenIncomplete = session.status === 'FLATTEN_INCOMPLETE'
   const remainingPositions = records(session.remaining_positions)
   const unresolvedEntries = records(session.unresolved_entries)
-  const symbols = records(Object.values(asRecord(market.symbols)))
-  const streamStates = symbols.map((item) => String(item.stream_state ?? 'DISCONNECTED'))
-  const marketState = streamStates.length && streamStates.every((item) => item === 'REALTIME')
-    ? 'REALTIME'
-    : streamStates.some((item) => item === 'RESYNCING') ? 'RESYNCING'
-      : streamStates.some((item) => item === 'STALE') ? 'STALE' : 'DISCONNECTED'
+  const marketState = marketStreamState(market)
   return <Panel title={copy(language, '自动交易会话', 'Auto Session')} eyebrow={translateCode(language, state)} className={`session-panel session-${state.toLowerCase()} ${compact ? 'session-compact' : ''}`}>
     <div className="session-summary"><div><StateTag value={state} language={language} /><p className="panel-copy">{sessionDescription(state, language)}</p></div>
       <dl className="session-facts">
@@ -241,7 +245,7 @@ export function OverviewMetrics({ data, language }: { data: DashboardData; langu
       <Metric label={copy(language, '保护状态', 'Protection')} value={`${protection.protected} / ${protection.total}`} detail={protection.critical ? translateCode(language, 'POSITION_UNPROTECTED') : copy(language, '止盈止损保护', 'Stop-loss / take-profit protection')} accent={protection.critical ? 'amber' : undefined} />
     </div>
     <div className="metric-row compact">
-      <Metric label={copy(language, '市场数据流', 'Market stream')} value={<StateTag value={records(Object.values(asRecord(market.symbols))).some((item) => item.stream_state === 'STALE') ? 'STALE' : records(Object.values(asRecord(market.symbols))).every((item) => item.stream_state === 'REALTIME') && Object.keys(asRecord(market.symbols)).length ? 'REALTIME' : 'DISCONNECTED'} language={language} />} />
+      <Metric label={copy(language, '市场数据流', 'Market stream')} value={<StateTag value={marketStreamState(market)} language={language} />} />
       <Metric label={copy(language, '最近确认的 1 分钟 K 线', 'Latest confirmed 1m candle')} value={confirmed > 0 ? formatTime(confirmed, language) : '—'} />
       <Metric label={copy(language, '行情数据延迟', 'Market data age')} value={formatAge(marketMetrics.market_latency_current_ms === undefined ? undefined : Number(marketMetrics.market_latency_current_ms) / 1000, language)} />
       <Metric label={copy(language, '账户同步延迟', 'Account sync age')} value={formatAge(observability.account_freshness_age_seconds, language)} />
