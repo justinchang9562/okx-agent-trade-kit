@@ -309,10 +309,15 @@ class RealtimeMarketState:
                 invalid = (
                     state.stream_state is not MarketStreamState.CONNECTED
                     or state.exchange_timestamp_ms is None
-                    or current - state.exchange_timestamp_ms > self.stale_after_ms
                     or state.last_book_timestamp_ms is None
-                    or current - state.last_book_timestamp_ms > self.stale_after_ms
                 )
+                # OKX tickers and books5 are event-driven: an unchanged market may
+                # legitimately emit no new symbol-level quote for several seconds.
+                # Transport liveness is enforced by the public/business connection
+                # state and the WebSocket ping/pong timeout. Confirmed candles below
+                # remain channel-specific freshness evidence. Treating quote exchange
+                # timestamps as a fixed 5-second heartbeat causes false fail-closed
+                # degradation on quieter symbols such as SOL Demo.
                 for timeframe, buffer in self._buffers[symbol].items():
                     last = buffer.last_confirmed
                     if last is None or current - (last.timestamp_ms + TIMEFRAME_MS[timeframe]) > (

@@ -193,7 +193,7 @@ const codeZh: Record<string, string> = {
   POSITION_UNPROTECTED: '仓位未受保护', EXPIRED: '已过期', PROTECTED: '已保护',
   BUY: '买入', SELL: '卖出', LONG: '做多', SHORT: '做空', HOLD: '观望', REJECT: '拒绝执行', BULLISH: '看涨', BEARISH: '看跌', NEUTRAL: '中性',
   SPOT: '现货', ACTUAL: '实际值', ATTACHED_REQUESTED: '已请求附加保护单',
-  DATA_UNAVAILABLE: '数据不可用', DATA_GAP: '历史数据存在缺口', DATA_INVALID: '历史数据无效', STALE_DATA: '市场数据已过期',
+  DATA_UNAVAILABLE: '数据不可用', DATA_GAP: '历史数据存在缺口', DATA_INVALID: '历史数据无效', STALE_DATA: '市场数据已过期', REALTIME_MARKET_STALE: '实时行情新鲜度检查未通过',
   EXECUTION_DISARMED: '执行尚未授权', TRADING_STOPPED: '交易已停止', KILL_SWITCH_ACTIVE: '紧急停止已启用',
   DAILY_KILL_SWITCH_ACTIVE: '每日亏损保护已触发', MAX_TOTAL_EXPOSURE_REACHED: '已达到最大总风险敞口',
   MAX_OPEN_POSITIONS_REACHED: '已达到最大托管仓位数', MAX_CONSECUTIVE_LOSSES_REACHED: '已达到最大连续亏损次数',

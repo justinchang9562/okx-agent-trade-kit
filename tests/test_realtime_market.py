@@ -108,9 +108,15 @@ def test_disconnect_and_stale_market_fail_closed_for_new_entries(endpoint) -> No
         state.assert_entry_ready(SYMBOL)
 
     state = ready_state()
-    assert state.watchdog(NOW_MS + 5_001) == (SYMBOL,)
+    assert state.watchdog(NOW_MS + TIMEFRAME_MS["1m"] + 5_001) == (SYMBOL,)
     with pytest.raises(PermissionError, match="MARKET_STREAM_STALE"):
         state.assert_entry_ready(SYMBOL)
+
+
+def test_event_driven_quote_without_change_does_not_false_stale() -> None:
+    state = ready_state()
+    assert state.watchdog(NOW_MS + 5_001) == ()
+    assert state.status()["symbols"][SYMBOL]["stream_state"] == "CONNECTED"
 
 
 def test_reconnect_requires_fresh_websocket_book_after_full_bootstrap() -> None:

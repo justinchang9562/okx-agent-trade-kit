@@ -240,5 +240,6 @@ describe('preserved global controls', () => {
     expect(translateCode('zh', 'HOLD')).toBe('观望')
     expect(translateCode('zh', 'REJECT')).toBe('拒绝执行')
     expect(translateCode('zh', 'RealtimeMarketError')).toBe('实时行情错误')
+    expect(translateCode('zh', 'REALTIME_MARKET_STALE')).toBe('实时行情新鲜度检查未通过')
   })
 })

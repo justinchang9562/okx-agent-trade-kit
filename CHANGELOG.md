@@ -8,6 +8,8 @@
 - Added read-only managed-exposure, protection, display-dust, realtime runtime, and degraded-reason projections.
 - Fixed macOS Python CA verification for OKX Demo WebSockets and normalized subscription request IDs to OKX's
   alphanumeric protocol requirement.
+- Corrected realtime freshness checks for event-driven ticker/books5 channels while preserving transport,
+  confirmed-candle, risk, and execution fail-closed guards.
 - Preserved the five top safety chips, Approval Center primary navigation, spacious visual layout, Demo-only MCP path, and frozen v0.4.1 trading core.
 
 ## 0.4.1 - 2026-08-23
