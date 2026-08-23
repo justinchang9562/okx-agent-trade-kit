@@ -42,7 +42,7 @@ contains no indicators. DemoExecutor rechecks the environment and backend Demo
 capability at the final boundary. Plan IDs are deterministic per symbol, side,
 strategy, and minute, providing retry deduplication.
 
-Core v0.2.1 persists `TradePlan -> OrderLifecycle -> ManagedPosition -> Trade` in
+Core v0.3.0 persists `TradePlan -> OrderLifecycle -> ManagedPosition -> Trade` in
 SQLite. Approval is only by `plan_id`; fresh data and risk are re-evaluated at
 approval. The lifecycle is committed before submission, and an uncertain
 transport result becomes `SUBMISSION_UNKNOWN` until client-order-ID
@@ -72,14 +72,17 @@ trading engine:
 
 ```text
 React / TypeScript / Vite (localhost browser)
-        | same-origin session + CSRF + authenticated read-only WebSocket
+        | same-origin session + CSRF + authenticated WebSocket ACK
 FastAPI /api/v1 (127.0.0.1, one process / one worker)
         |
-TradingService (compatibility state, scheduler, audit, one-thread executor)
-        |
-LocalControlAPI -> one authoritative TradingOrchestrator -> existing Core
+TradingService (compatibility state, scheduler, audit)
+        +-> one-thread authoritative Core -> LocalControlAPI -> TradingOrchestrator
+        +-> one-thread BacktestService -> independent read-only MCP backend
 ```
 
-Scheduler reconciliation, AUTO approval and backtests use the same serialized
-Core worker. Browser state is a projection; Core TradePlan/order/managed-position
-rows remain authoritative. See [API/WebSocket v1](web-dashboard-api-v1.md).
+Scheduler reconciliation and AUTO approval use the serialized Core worker.
+Backtests cannot occupy it, cannot reuse the credential-bearing execution object,
+and are blocked while execution is ARMED. Browser state is a projection; Core
+TradePlan/order/managed-position rows remain authoritative. The WebSocket accepts
+only strict heartbeat acknowledgements and never accepts control actions. See
+[API/WebSocket v1](web-dashboard-api-v1.md).

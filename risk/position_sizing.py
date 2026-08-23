@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN
+from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 
 from data.models import AccountSnapshot, Instrument
 
@@ -21,6 +21,38 @@ def _floor_step(value: float, step: float) -> float:
         raise ValueError("lot size must be positive")
     units = (Decimal(str(value)) / Decimal(str(step))).to_integral_value(rounding=ROUND_DOWN)
     return float(units * Decimal(str(step)))
+
+
+def minimum_executable_quantity(instrument: Instrument) -> float:
+    if instrument.min_size <= 0 or instrument.lot_size <= 0:
+        raise ValueError("INVALID_INSTRUMENT_SIZE_RULES")
+    units = (
+        Decimal(str(instrument.min_size)) / Decimal(str(instrument.lot_size))
+    ).to_integral_value(rounding=ROUND_CEILING)
+    return float(units * Decimal(str(instrument.lot_size)))
+
+
+def cap_position_size(
+    sizing: SizingResult,
+    instrument: Instrument,
+    entry: float,
+    stop: float,
+    maximum_quantity: float,
+) -> SizingResult:
+    """Reduce an approved risk-sized position without ever increasing its exposure."""
+    if not sizing.approved:
+        return sizing
+    capped_quantity = _floor_step(min(sizing.quantity, maximum_quantity), instrument.lot_size)
+    if capped_quantity < minimum_executable_quantity(instrument):
+        return SizingResult(False, "BELOW_MINIMUM_ORDER_SIZE")
+    return SizingResult(
+        True,
+        "PASS",
+        quantity=capped_quantity,
+        notional_usdt=capped_quantity * entry,
+        risk_amount=capped_quantity * (entry - stop),
+        capped=True,
+    )
 
 
 def calculate_position_size(

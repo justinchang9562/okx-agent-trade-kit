@@ -46,6 +46,8 @@ class ManagedPosition:
     closed_at_ms: int | None = None
     exit_order_id: str | None = None
     protective_order_ids_json: str | None = None
+    exit_filled_quantity: float = 0.0
+    exit_fee_breakdown_json: str | None = None
 
 
 class TradeStore:
@@ -283,6 +285,33 @@ class TradeStore:
             rows = self.connection.execute("SELECT * FROM managed_positions ORDER BY opened_at_ms").fetchall()
         return [ManagedPosition(**dict(row)) for row in rows]
 
+    @synchronized
+    def mark_managed_partial_exit(
+        self,
+        plan_id: str,
+        filled_quantity: float,
+        fee_breakdown: dict[str, float],
+    ) -> bool:
+        cursor = self.connection.execute(
+            """UPDATE managed_positions
+                  SET state = ?, exit_filled_quantity = ?, exit_fee_breakdown_json = ?,
+                      updated_at_ms = ?
+                WHERE plan_id = ? AND state IN (?, ?, ?, ?)""",
+            (
+                OrderState.EXIT_PARTIALLY_FILLED.value,
+                filled_quantity,
+                json.dumps(fee_breakdown, sort_keys=True),
+                now_ms(),
+                plan_id,
+                OrderState.PARTIALLY_FILLED.value,
+                OrderState.FILLED.value,
+                OrderState.POSITION_UNPROTECTED.value,
+                OrderState.EXIT_PARTIALLY_FILLED.value,
+            ),
+        )
+        self.connection.commit()
+        return cursor.rowcount == 1
+
     def managed_open_count(self) -> int:
         return len(self.managed_positions(active_only=True))
 
@@ -367,6 +396,92 @@ class TradeStore:
         ).fetchall()]
 
     @synchronized
+    def reconciliation_cursor(self, symbol: str, stream_kind: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM reconciliation_cursors WHERE symbol = ? AND stream_kind = ?",
+            (symbol, stream_kind),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    @synchronized
+    def update_reconciliation_cursor(
+        self,
+        symbol: str,
+        stream_kind: str,
+        last_timestamp_ms: int | None,
+        last_fill_id: str | None,
+    ) -> None:
+        self.connection.execute(
+            """INSERT INTO reconciliation_cursors
+               (symbol, stream_kind, last_timestamp_ms, last_fill_id, updated_at_ms)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(symbol, stream_kind) DO UPDATE SET
+                 last_timestamp_ms=excluded.last_timestamp_ms,
+                 last_fill_id=excluded.last_fill_id,
+                 updated_at_ms=excluded.updated_at_ms""",
+            (symbol, stream_kind, last_timestamp_ms, last_fill_id, now_ms()),
+        )
+        self.connection.commit()
+
+    @synchronized
+    def record_reconciliation_event(
+        self,
+        plan_id: str | None,
+        symbol: str,
+        result_code: str,
+        details: dict[str, Any],
+    ) -> None:
+        self.connection.execute(
+            """INSERT INTO reconciliation_audit
+               (timestamp_ms, plan_id, symbol, result_code, details_json)
+               VALUES (?, ?, ?, ?, ?)""",
+            (now_ms(), plan_id, symbol, result_code, json.dumps(details, default=str, sort_keys=True)),
+        )
+        self.connection.commit()
+
+    @synchronized
+    def reconciliation_events(self, limit: int = 200) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 1000))
+        rows = self.connection.execute(
+            "SELECT * FROM reconciliation_audit ORDER BY timestamp_ms DESC, id DESC LIMIT ?",
+            (safe_limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    @synchronized
+    def record_reconciled_exit_fills(self, plan_id: str, fills: list[dict[str, Any]]) -> int:
+        """Persist normalized fill facts only; exchange raw payloads are never authoritative state."""
+        inserted = 0
+        for fill in fills:
+            cursor = self.connection.execute(
+                """INSERT OR IGNORE INTO reconciled_exit_fills
+                   (plan_id, fill_key, order_id, fill_timestamp_ms, quantity, price,
+                    fee, fee_currency)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    plan_id,
+                    str(fill["fill_key"]),
+                    fill.get("order_id"),
+                    int(fill["fill_timestamp_ms"]),
+                    float(fill["quantity"]),
+                    float(fill["price"]),
+                    float(fill["fee"]) if fill.get("fee") is not None else None,
+                    fill.get("fee_currency"),
+                ),
+            )
+            inserted += cursor.rowcount
+        self.connection.commit()
+        return inserted
+
+    @synchronized
+    def reconciled_exit_fills(self, plan_id: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.connection.execute(
+            """SELECT * FROM reconciled_exit_fills WHERE plan_id = ?
+               ORDER BY fill_timestamp_ms, fill_key""",
+            (plan_id,),
+        ).fetchall()]
+
+    @synchronized
     def record_entry_fill(
         self, plan: TradePlan, order_id: str | None, entry_time_ms: int,
         entry_price: float, quantity: float, fees: float | None,
@@ -386,12 +501,22 @@ class TradeStore:
              plan.signal_score, plan.plan_id, order_id, entry_time_ms, entry_price, quantity,
              slippage_abs, slippage_pct, "ACTUAL" if fees is not None else "UNKNOWN"),
         )
+        if fees is not None:
+            self.connection.execute(
+                """UPDATE trades SET fees = ?, fee_status = 'ACTUAL'
+                   WHERE plan_id = ? AND exit_time_ms IS NULL AND fees IS NULL""",
+                (fees, plan.plan_id),
+            )
         self.connection.commit()
 
     @synchronized
     def close_trade(
         self, plan_id: str, exit_time_ms: int, exit_price: float,
         exit_fees: float | None, exit_order_id: str | None = None,
+        *,
+        exit_filled_quantity: float | None = None,
+        exit_fee_breakdown: dict[str, float] | None = None,
+        exit_fee_conversion_required: bool = False,
     ) -> None:
         with self._lock:
             try:
@@ -412,14 +537,26 @@ class TradeStore:
                        fees = ?, pnl = ?, net_pnl = ?, holding_time_seconds = ?,
                        fee_status = ?, exit_order_id = ? WHERE plan_id = ? AND exit_time_ms IS NULL""",
                     (exit_price, exit_price, exit_time_ms, gross, total_fees, net, net, holding,
-                     "ACTUAL" if total_fees is not None else "UNKNOWN", exit_order_id, plan_id),
+                     (
+                         "ACTUAL" if total_fees is not None
+                         else "CURRENCY_CONVERSION_REQUIRED" if exit_fee_conversion_required
+                         else "UNKNOWN"
+                     ),
+                     exit_order_id,
+                     plan_id),
                 )
                 position = self.connection.execute(
                     "UPDATE managed_positions SET state = ?, closed_at_ms = ?, updated_at_ms = ?, "
-                    "exit_order_id = ? WHERE plan_id = ? AND state IN (?, ?, ?)",
-                    (OrderState.CLOSED.value, exit_time_ms, now_ms(), exit_order_id, plan_id,
+                    "exit_order_id = ?, exit_filled_quantity = COALESCE(?, exit_filled_quantity), "
+                    "exit_fee_breakdown_json = COALESCE(?, exit_fee_breakdown_json) "
+                    "WHERE plan_id = ? AND state IN (?, ?, ?, ?)",
+                    (OrderState.CLOSED.value, exit_time_ms, now_ms(), exit_order_id,
+                     exit_filled_quantity,
+                     json.dumps(exit_fee_breakdown, sort_keys=True)
+                     if exit_fee_breakdown is not None else None,
+                     plan_id,
                      OrderState.PARTIALLY_FILLED.value, OrderState.FILLED.value,
-                     OrderState.POSITION_UNPROTECTED.value),
+                     OrderState.POSITION_UNPROTECTED.value, OrderState.EXIT_PARTIALLY_FILLED.value),
                 )
                 if position.rowcount != 1:
                     raise StateChangedError("MANAGED_POSITION_NOT_ACTIVE")

@@ -9,9 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from typing import Any, TypeVar
 
-from backtest.backtester import Backtester
 from storage.control_store import ControlStore
 from storage.trade_store import now_ms
+from trading_agent.backtest_service import BacktestService
 from trading_agent.config import AppConfig
 from trading_agent.control_api import LocalControlAPI
 from trading_agent.control_state import (
@@ -81,11 +81,13 @@ class TradingService:
         orchestrator: TradingOrchestrator | None = None,
         *,
         start_scheduler: bool = True,
+        backtest_service: BacktestService | None = None,
     ) -> None:
         self.config = config
         self._orchestrator = orchestrator or TradingOrchestrator(config)
         self._api = LocalControlAPI(self._orchestrator)
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="trading-core")
+        self._backtests = backtest_service or BacktestService(config)
         self._control = ControlStore(config.root / "trading_agent.db")
         self._events: deque[dict[str, Any]] = deque(maxlen=500)
         self._event_lock = threading.RLock()
@@ -101,6 +103,8 @@ class TradingService:
         self._last_status: dict[str, Any] = {}
         self._last_orders: dict[str, Any] = {}
         self._last_positions: dict[str, Any] = {}
+        self._last_scan_at_ms: int | None = None
+        self._last_health_at_ms: int | None = None
         self._orchestrator.order_manager.executor.entry_guard = self._final_entry_guard
         self._run_core(self._safe_startup)
         if start_scheduler:
@@ -119,6 +123,7 @@ class TradingService:
         self._orchestrator.state.auto_demo_enabled = False
         self._orchestrator.state.set_mode(RuntimeMode.STOPPED)
         snapshot = self._control.reset_for_startup()
+        self._orchestrator.state.kill_switch_active = snapshot.kill_switch_active
         self._emit("control.state", snapshot.as_dict(), "SAFE_RESTART")
         try:
             recovery = self._api.agent.recover()
@@ -152,9 +157,9 @@ class TradingService:
 
     def client_stream_connected(self, connection_id: str) -> None:
         with self._client_lock:
-            self._client_streams[connection_id] = time.monotonic()
+            self._client_streams[connection_id] = 0.0
 
-    def client_stream_heartbeat(self, connection_id: str) -> None:
+    def client_stream_acknowledged(self, connection_id: str) -> None:
         with self._client_lock:
             if connection_id in self._client_streams:
                 self._client_streams[connection_id] = time.monotonic()
@@ -166,7 +171,13 @@ class TradingService:
     def client_stream_fresh(self, max_age_seconds: float = 8.0) -> bool:
         with self._client_lock:
             heartbeats = tuple(self._client_streams.values())
-        return bool(heartbeats) and time.monotonic() - max(heartbeats) <= max_age_seconds
+        acknowledgements = [timestamp for timestamp in heartbeats if timestamp > 0]
+        return bool(acknowledgements) and time.monotonic() - max(acknowledgements) <= max_age_seconds
+
+    def client_stream_freshness_age_seconds(self) -> float | None:
+        with self._client_lock:
+            acknowledgements = [timestamp for timestamp in self._client_streams.values() if timestamp > 0]
+        return time.monotonic() - max(acknowledgements) if acknowledgements else None
 
     def _sync_core_state(self) -> None:
         control = self._control.get()
@@ -292,6 +303,7 @@ class TradingService:
             connection = ConnectionState.DISCONNECTED
         health = sanitize_for_browser(health)
         self._last_health = health
+        self._last_health_at_ms = now_ms()
         current = self._control.get()
         if current.connection_state is not connection:
             self._transition("BACKEND_CONNECTION_UPDATE", connection_state=connection)
@@ -372,11 +384,36 @@ class TradingService:
 
     def status(self) -> dict[str, Any]:
         core = self._run_core(self._api.get_status)
+        pending = self.plans(limit=200)
+        pending_expiries = [
+            int(item["expires_at_ms"])
+            for item in pending
+            if item.get("ui_status") == "PENDING_APPROVAL" and item.get("expires_at_ms") is not None
+        ]
         self._last_status = sanitize_for_browser({
             "schema_version": "1.0",
             "control": self.control(),
             "core": core,
             "live": {"setup_state": "NOT_CONFIGURED", "execution": "LOCKED"},
+            "observability": {
+                "connection_freshness_age_seconds": self.client_stream_freshness_age_seconds(),
+                "last_scan_at_ms": self._last_scan_at_ms,
+                "last_health_at_ms": self._last_health_at_ms,
+                "pending_plan_nearest_expiry_ms": min(pending_expiries) if pending_expiries else None,
+                "daily_pnl": core.get("daily_pnl"),
+                "consecutive_losses": core.get("consecutive_losses"),
+                "wallet_exposure_pct": (
+                    float(self._last_account.get("exposure", {}).get("wallet_exposure_usdt", 0))
+                    / float(self._last_account.get("equity_usdt", 0))
+                    if isinstance(self._last_account.get("exposure"), dict)
+                    and float(self._last_account.get("equity_usdt", 0)) > 0
+                    else None
+                ),
+                "managed_exposure_usdt": (
+                    self._last_account.get("exposure", {}).get("managed_exposure_usdt")
+                    if isinstance(self._last_account.get("exposure"), dict) else None
+                ),
+            },
         })
         return self._last_status
 
@@ -387,6 +424,7 @@ class TradingService:
 
     def scan(self) -> dict[str, Any]:
         self._last_scan = sanitize_for_browser(self._run_core(self._api.scan))
+        self._last_scan_at_ms = now_ms()
         self._emit("scanner.updated", self._last_scan)
         return self._last_scan
 
@@ -428,6 +466,27 @@ class TradingService:
         return sanitize_for_browser(result)
 
     @serialized_action
+    def approve_plan_with_challenge(
+        self,
+        plan_id: str,
+        expected_preview: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._require_execution_ready()
+        result = self._run_core(
+            self._orchestrator.approve_plan,
+            plan_id,
+            APPROVAL_CONFIRMATION,
+            expected_preview=expected_preview,
+        )
+        reason = str(result.get("reason", "PASS"))
+        self._emit("plan.approval_result", result, reason)
+        if result.get("status") == "REPREVIEW_REQUIRED":
+            raise ServiceError("APPROVAL_PREVIEW_CHANGED", 409)
+        if result.get("status") == "REJECTED":
+            raise ServiceError(reason, 409)
+        return sanitize_for_browser(result)
+
+    @serialized_action
     def approve_plan(self, plan_id: str, confirmation: str) -> dict[str, Any]:
         self._require_execution_ready()
         if confirmation.strip() != APPROVAL_CONFIRMATION:
@@ -462,15 +521,15 @@ class TradingService:
             raise ServiceError("SYMBOL_NOT_CONFIGURED", 422)
         if days not in {7, 30, 90}:
             raise ServiceError("INVALID_BACKTEST_RANGE", 422)
-
-        def run() -> dict[str, Any]:
-            backtester = Backtester(
-                self._orchestrator.adapter.backend, self.config.rules,
-                self.config.root / "data_cache",
-            )
-            return backtester.walk_forward(symbol, days) if walk_forward else backtester.run(symbol, days)
-
-        result = self._run_core(run)
+        control = self._control.get()
+        if control.execution_state is ExecutionState.ARMED:
+            raise ServiceError("BACKTEST_BLOCKED_WHILE_EXECUTION_ARMED", 423)
+        if (
+            control.agent_runtime_state is AgentRuntimeState.RUNNING
+            and not self._backtests.concurrent_with_runtime_supported()
+        ):
+            raise ServiceError("BACKTEST_BACKEND_CONCURRENCY_UNAVAILABLE", 409)
+        result = self._backtests.run(symbol, days, walk_forward)
         self._emit("backtest.completed", {"symbol": symbol, "days": days, "walk_forward": walk_forward})
         return sanitize_for_browser(result)
 
@@ -621,6 +680,7 @@ class TradingService:
         finally:
             self._closed = True
             self._worker.shutdown(wait=True, cancel_futures=True)
+            self._backtests.close()
             self._control.close()
 
     def __enter__(self) -> TradingService:

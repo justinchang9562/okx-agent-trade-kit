@@ -17,7 +17,8 @@ class Signal:
     risk_reward: float | None
     reasons: tuple[str, ...] = ()
     timeframes: dict[str, str] = field(default_factory=dict)
-    strategy: str = "rule_scalping_v1"
+    strategy: str = "scalping_v1_baseline"
+    research_quality_score: float | None = None
 
     @property
     def confidence(self) -> float:

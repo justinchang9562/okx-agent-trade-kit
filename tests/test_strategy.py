@@ -1,7 +1,7 @@
 from dataclasses import replace
 
-from tests.conftest import candles
 from strategies.scalping_strategy import ScalpingStrategy
+from tests.conftest import candles
 
 
 def rules() -> dict:

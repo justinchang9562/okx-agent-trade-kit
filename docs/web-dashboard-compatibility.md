@@ -1,8 +1,8 @@
 # Local Web Dashboard v2.1 — Core Compatibility Review
 
-Status: W0 frozen baseline
+Status: W0-W7 compatibility baseline, hardened in project release v0.3.0
 
-Source: `OKX_Local_Web_Dashboard_Plan_v2.1.pdf` and Core Hardening v0.2.1
+Source: `OKX_Local_Web_Dashboard_Plan_v2.1.pdf`, Core Hardening v0.2.1 and remediation v0.3.0
 
 Baseline tests: 61 passed, 0 failed
 
@@ -27,17 +27,18 @@ The service facade adds the PDF state domains without rewriting Core enums:
 
 | Service domain | v1 values | Core compatibility |
 |---|---|---|
-| Environment | `DEMO`, `LIVE` | Core v0.2.1 remains Demo; `LIVE` requests fail `LIVE_NOT_CONFIGURED`. |
+| Environment | `DEMO`, `LIVE` | Core v0.3.0 remains Demo; `LIVE` requests fail `LIVE_NOT_CONFIGURED`. |
 | Live setup | `NOT_CONFIGURED`, `READ_ONLY_READY`, `TRADE_PERMISSION_READY` | W0-W7 always reports `NOT_CONFIGURED`. |
 | Execution | `DISARMED`, `ARMED` | Additive hard gate composed with `AgentState.require_new_entry_allowed`. |
 | Agent runtime | `STOPPED`, `RUNNING`, `DEGRADED`, `STALE` | Service scheduler state; Core is set to `STOPPED` whenever new entries must stop. |
 | Trading mode | `STOPPED`, `DRY_RUN`, `MANUAL_APPROVAL`, `AUTO` | Maps to existing `RuntimeMode`; PDF `AUTO` maps to Core `AUTO_DEMO`. |
-| Connection | `CONNECTED`, `STALE`, `DISCONNECTED` | Derived from backend health and WebSocket heartbeat; it is never a write permission. |
+| Connection | `CONNECTED`, `STALE`, `DISCONNECTED` | Derived from backend health and authenticated client ACK freshness; it is never a write permission. |
 | Kill switch | `OFF`, `ON` | `ON` blocks new entries, stops scanning and disarms, while preserving protective orders. |
 
 The persisted service control record is audit/history input, not authority to
 restore risk. Every backend start forcibly writes `DEMO + DISARMED + STOPPED +
-AUTO disabled`. In particular, `ARMED` is never restored.
+AUTO disabled`. `ARMED` is never restored; an ACTIVE Kill Switch is deliberately
+preserved until explicit reset, along with only a valid low-risk scan interval.
 
 ## TradePlan compatibility view
 
@@ -59,10 +60,11 @@ events/projections, not new persisted order states.
 ## Single-owner call model
 
 FastAPI creates exactly one `TradingService` in application lifespan. That
-service owns one `TradingOrchestrator` and a one-thread executor. HTTP requests,
-the scheduler, reconciliation, backtests and WebSocket snapshot refreshes submit
-Core work through that executor. Direct route access to MCP, SQLite, OrderManager
-or credentials is prohibited.
+service owns one `TradingOrchestrator` and a one-thread Core executor. HTTP
+requests, scheduler and reconciliation submit Core work through that executor.
+Backtests use a separate single-thread runner and independent public read-only
+backend, so they cannot delay health, kill or stop paths. Direct route access to
+MCP, SQLite, OrderManager or credentials is prohibited.
 
 ## W1-W7 acceptance mapping
 
@@ -71,7 +73,7 @@ or credentials is prohibited.
 - W2: responsive Vite dashboard, typed client, reconnecting WebSocket, stale write
   lockout and read-only panels.
 - W3: action-only environment/mode/execution/agent transitions; Live stays locked.
-- W4: server-plan-only preview/confirm/reject approval center.
+- W4: server-plan-only preview/one-time-challenge/reject approval center.
 - W5: session-only, explicit, default-off AUTO DEMO; scheduler and kill switch.
 - W6: backtest, redacted logs and safe runtime settings.
 - W7: freeze schemas/events, integration/security tests and macOS reuse document.

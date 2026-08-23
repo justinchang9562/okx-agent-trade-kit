@@ -27,15 +27,24 @@ class ControlStore:
         self._lock = threading.RLock()
 
     def reset_for_startup(self) -> ControlSnapshot:
-        safe = ControlSnapshot(updated_at_ms=now_ms())
         with self._lock:
             previous = self.get_optional()
+            interval = (
+                previous.scan_interval_seconds
+                if previous is not None and 5 <= previous.scan_interval_seconds <= 3600
+                else 15.0
+            )
+            safe = ControlSnapshot(
+                kill_switch_active=bool(previous and previous.kill_switch_active),
+                scan_interval_seconds=interval,
+                updated_at_ms=now_ms(),
+            )
             try:
                 self.connection.execute("BEGIN IMMEDIATE")
                 self._write(safe, commit=False)
                 self._audit(
                     previous or safe, safe, "SERVICE_STARTUP_SAFE_RESET", "system",
-                    "SAFE_RESTART", commit=False,
+                    "SAFE_RESTART_KILL_SWITCH_PRESERVED", commit=False,
                 )
                 self.connection.commit()
             except Exception:

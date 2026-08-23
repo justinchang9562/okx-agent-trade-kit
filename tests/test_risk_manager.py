@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 import pytest
 
 from risk.daily_limits import DailyRiskState
-from risk.risk_manager import RiskManager
 from risk.exposure import ExposureSnapshot
+from risk.risk_manager import RiskManager
 
 
 def rules() -> dict:

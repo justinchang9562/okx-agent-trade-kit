@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -19,14 +20,15 @@ class MCPError(RuntimeError):
 
 
 class StdioMCPClient:
-    def __init__(self, command: str, timeout: float = 15.0) -> None:
+    def __init__(self, command: str | Sequence[str], timeout: float = 15.0) -> None:
         self.command = command
         self.timeout = timeout
         self._next_id = 1
         self._request_lock = threading.Lock()
         self._stderr_lines = 0
         self._process = subprocess.Popen(
-            [command], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            [command] if isinstance(command, str) else list(command),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
         )
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
@@ -34,7 +36,7 @@ class StdioMCPClient:
         try:
             self._request("initialize", {
                 "protocolVersion": "2025-06-18", "capabilities": {},
-                "clientInfo": {"name": "okx-agent-trade-kit", "version": "0.2.1"},
+                "clientInfo": {"name": "okx-agent-trade-kit", "version": "0.3.0"},
             })
             self._notify("notifications/initialized", {})
         except Exception:
@@ -150,24 +152,43 @@ def discover_demo_mcp_command() -> str | None:
 class MCPBackend(BaseBackend):
     name = "mcp"
 
-    def __init__(self, command: str | None = None, client: StdioMCPClient | None = None) -> None:
+    def __init__(
+        self,
+        command: str | None = None,
+        client: StdioMCPClient | None = None,
+        argv: Sequence[str] | None = None,
+    ) -> None:
         self.command = command or discover_demo_mcp_command()
+        self.argv = tuple(argv) if argv is not None else None
         self._client = client
         self._last_error = ""
+        self._tool_cache: dict[str, dict[str, Any]] | None = None
 
     @property
     def client(self) -> StdioMCPClient:
         if self._client is None:
-            if not self.command:
+            if not self.command and not self.argv:
                 raise MCPError("OKX_DEMO_MCP_NOT_CONFIGURED")
-            self._client = StdioMCPClient(self.command)
+            self._client = StdioMCPClient(self.argv or str(self.command))
         return self._client
 
     def _call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return self.client.call_tool(tool, arguments)
 
+    def _tools(self) -> dict[str, dict[str, Any]]:
+        if self._tool_cache is None:
+            self._tool_cache = {
+                str(item.get("name")): item
+                for item in self.client.list_tools().get("tools", [])
+                if isinstance(item, dict) and item.get("name")
+            }
+        return self._tool_cache
+
+    def _tool_properties(self, name: str) -> set[str]:
+        return set(self._tools().get(name, {}).get("inputSchema", {}).get("properties", {}))
+
     def status(self) -> BackendStatus:
-        if not self.command:
+        if not self.command and not self.argv:
             return BackendStatus(self.name, "NOT_CONFIGURED", False, False, "OKX_DEMO_MCP_NOT_CONFIGURED")
         try:
             result = self._call("system_get_capabilities", {})
@@ -210,10 +231,37 @@ class MCPBackend(BaseBackend):
             args["instId"] = symbol
         return self._call("spot_get_orders", args)
 
-    def get_fills(self, symbol: str | None = None) -> dict[str, Any]:
-        args: dict[str, Any] = {"limit": 100}
+    def get_fills(
+        self,
+        symbol: str | None = None,
+        *,
+        after: str | None = None,
+        before: str | None = None,
+        order_id: str | None = None,
+        begin_ms: int | None = None,
+        end_ms: int | None = None,
+        archive: bool = False,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        properties = self._tool_properties("spot_get_fills")
+        requested = {
+            "after": after,
+            "before": before,
+            "ordId": order_id,
+            "begin": begin_ms,
+            "end": end_ms,
+            "archive": True if archive else None,
+        }
+        unsupported = sorted(key for key, value in requested.items() if value is not None and key not in properties)
+        if unsupported:
+            raise NotImplementedError(f"FILL_QUERY_CAPABILITY_UNAVAILABLE:{','.join(unsupported)}")
+        safe_limit = max(1, min(int(limit), 20 if archive else 100))
+        args: dict[str, Any] = {"limit": safe_limit}
         if symbol:
             args["instId"] = symbol
+        for key, value in requested.items():
+            if value is not None:
+                args[key] = str(value) if key in {"begin", "end"} else value
         return self._call("spot_get_fills", args)
 
     def get_order(self, symbol: str, order_id: str) -> dict[str, Any]:
@@ -230,17 +278,23 @@ class MCPBackend(BaseBackend):
 
     def capabilities(self) -> dict[str, Any]:
         try:
-            tools = {item.get("name"): item for item in self.client.list_tools().get("tools", [])}
+            tools = self._tools()
         except Exception:
             return super().capabilities()
         def properties(name: str) -> set[str]:
-            return set(tools.get(name, {}).get("inputSchema", {}).get("properties", {}))
+            return self._tool_properties(name)
+        fill_properties = properties("spot_get_fills")
         return {
             "client_order_id": "clOrdId" in properties("spot_get_order"),
             "attached_tp_sl": {"tpTriggerPx", "slTriggerPx"}.issubset(properties("spot_place_order"))
                               and "spot_get_algo_orders" in tools,
             "historical_pagination": {"after", "before"}.issubset(properties("market_get_candles")),
             "algo_order_query": "spot_get_algo_orders" in tools,
+            "fills_pagination": {"after", "before"}.issubset(fill_properties),
+            "fill_order_lookup": "ordId" in fill_properties,
+            "fills_time_window": {"begin", "end"}.issubset(fill_properties),
+            "fills_archive": "archive" in fill_properties,
+            "concurrent_read_only": False,
         }
 
     def place_order(self, order: dict[str, Any]) -> dict[str, Any]:
@@ -260,3 +314,20 @@ class MCPBackend(BaseBackend):
         if self._client:
             self._client.close()
             self._client = None
+            self._tool_cache = None
+
+
+def public_read_only_mcp_backend() -> MCPBackend:
+    """Create a separate no-credential MCP process exposing public market reads only."""
+    executable = shutil.which("okx-trade-mcp")
+    if not executable:
+        raise MCPError("OKX_READ_ONLY_MCP_NOT_CONFIGURED")
+    return MCPBackend(
+        argv=(
+            executable,
+            "--demo",
+            "--read-only",
+            "--modules",
+            "market",
+        )
+    )

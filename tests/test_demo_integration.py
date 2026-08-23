@@ -1,5 +1,6 @@
-import pytest
 from dataclasses import replace
+
+import pytest
 
 from execution.mcp_backend import MCPBackend, discover_demo_mcp_command
 from execution.okx_adapter import OKXAdapter

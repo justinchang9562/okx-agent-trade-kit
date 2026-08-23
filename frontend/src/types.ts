@@ -19,6 +19,7 @@ export interface StatusPayload {
   control: ControlState
   core: Record<string, unknown>
   live: { setup_state: string; execution: string }
+  observability?: Record<string, unknown>
 }
 
 export interface Plan {

@@ -9,7 +9,6 @@ from execution.errors import PreSubmitRejectedError, SubmissionUncertainError
 from execution.order_state import OrderState
 from storage.trade_store import now_ms
 
-
 EXPLICIT_APPROVALS = {"确认执行", "CONFIRM EXECUTION", "CONFIRM DEMO ORDER"}
 
 
@@ -43,6 +42,10 @@ def _map_state(row: dict[str, Any], requested_size: float) -> tuple[str, float, 
 
 
 class OrderManager:
+    MAX_FILL_PAGES = 20
+    RECENT_FILL_WINDOW_MS = 3 * 24 * 60 * 60 * 1000
+    ARCHIVE_FILL_WINDOW_MS = 90 * 24 * 60 * 60 * 1000
+
     def __init__(self, executor: DemoExecutor, store: Any) -> None:
         self.executor = executor
         self.store = store
@@ -169,15 +172,30 @@ class OrderManager:
         if not order_id:
             return
         try:
-            fills = [row for row in _rows(self.executor.backend.get_fills(local["symbol"]))
-                     if str(row.get("ordId", "")) == order_id]
+            capabilities = self.executor.backend.capabilities()
+            current = now_ms()
+            age = max(0, current - int(local.get("created_at_ms") or current))
+            archive = age > self.RECENT_FILL_WINDOW_MS
+            if archive and (age > self.ARCHIVE_FILL_WINDOW_MS or not capabilities.get("fills_archive")):
+                return
+            fills, complete = self._fill_pages(
+                local["symbol"],
+                capabilities,
+                order_id=order_id if capabilities.get("fill_order_lookup") else None,
+                begin_ms=int(local.get("created_at_ms") or current),
+                end_ms=current,
+                archive=archive,
+            )
         except Exception:
             return
-        if not fills:
+        fills = [row for row in fills if str(row.get("ordId", "")) == order_id]
+        if not complete or not fills:
             return
-        fees = [float(row["fee"]) for row in fills if row.get("fee") not in (None, "")]
-        fee = sum(fees) if len(fees) == len(fills) else None
-        fee_currency = next((str(row["feeCcy"]) for row in fills if row.get("feeCcy")), None)
+        currencies = {str(row["feeCcy"]).upper() for row in fills if row.get("feeCcy")}
+        fees = [abs(float(row["fee"])) for row in fills if row.get("fee") not in (None, "")]
+        quote_currency = str(local["symbol"]).split("-")[-1].upper()
+        fee = sum(fees) if len(fees) == len(fills) and currencies == {quote_currency} else None
+        fee_currency = next(iter(currencies)) if len(currencies) == 1 else None
         self.store.transition_order(local["plan_id"], self.store.order_for_plan(local["plan_id"])["state"],
                                     fee=fee, fee_currency=fee_currency)
 
@@ -204,6 +222,149 @@ class OrderManager:
         recovered.extend(self.reconcile_managed_positions())
         return recovered
 
+    @staticmethod
+    def _fill_key(row: dict[str, Any]) -> str:
+        identifier = row.get("tradeId") or row.get("billId") or row.get("fillId")
+        if identifier not in (None, ""):
+            return str(identifier)
+        return "|".join(str(row.get(key, "")) for key in ("ordId", "fillTime", "fillSz", "fillPx", "fee"))
+
+    @staticmethod
+    def _page_cursor(row: dict[str, Any]) -> str | None:
+        value = row.get("billId") or row.get("tradeId") or row.get("fillId")
+        return str(value) if value not in (None, "") else None
+
+    def _fill_pages(
+        self,
+        symbol: str,
+        capabilities: dict[str, Any],
+        *,
+        order_id: str | None,
+        begin_ms: int,
+        end_ms: int,
+        archive: bool,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        limit = 20 if archive else 100
+        after: str | None = None
+        seen_cursors: set[str] = set()
+        unique: dict[str, dict[str, Any]] = {}
+        for _page in range(self.MAX_FILL_PAGES):
+            payload = self.executor.backend.get_fills(
+                symbol,
+                after=after,
+                order_id=order_id,
+                begin_ms=begin_ms if capabilities.get("fills_time_window") else None,
+                end_ms=end_ms if capabilities.get("fills_time_window") else None,
+                archive=archive,
+                limit=limit,
+            )
+            rows = _rows(payload)
+            for row in rows:
+                unique.setdefault(self._fill_key(row), row)
+            if len(rows) < limit:
+                return list(unique.values()), True
+            if not capabilities.get("fills_pagination"):
+                return list(unique.values()), False
+            cursor = self._page_cursor(rows[-1]) if rows else None
+            if not cursor or cursor in seen_cursors:
+                return list(unique.values()), False
+            seen_cursors.add(cursor)
+            after = cursor
+        return list(unique.values()), False
+
+    def _load_exit_fills(
+        self,
+        symbol: str,
+        begin_ms: int,
+        protective_ids: set[str],
+    ) -> tuple[list[dict[str, Any]], bool, str]:
+        try:
+            capabilities = self.executor.backend.capabilities()
+        except Exception:
+            return [], False, "RECOVERY_DATA_INSUFFICIENT"
+        current = now_ms()
+        age = max(0, current - begin_ms)
+        archive = age > self.RECENT_FILL_WINDOW_MS
+        if age > self.ARCHIVE_FILL_WINDOW_MS:
+            return [], False, "EXIT_FILL_HISTORY_INCOMPLETE"
+        if archive and not capabilities.get("fills_archive"):
+            return [], False, "RECOVERY_DATA_INSUFFICIENT"
+        if not capabilities.get("fill_order_lookup") and not capabilities.get("fills_pagination"):
+            return [], False, "RECOVERY_DATA_INSUFFICIENT"
+
+        complete = True
+        rows: list[dict[str, Any]] = []
+        try:
+            if capabilities.get("fill_order_lookup"):
+                for protective_id in sorted(protective_ids):
+                    page_rows, page_complete = self._fill_pages(
+                        symbol,
+                        capabilities,
+                        order_id=protective_id,
+                        begin_ms=begin_ms,
+                        end_ms=current,
+                        archive=archive,
+                    )
+                    rows.extend(page_rows)
+                    complete = complete and page_complete
+            else:
+                rows, complete = self._fill_pages(
+                    symbol,
+                    capabilities,
+                    order_id=None,
+                    begin_ms=begin_ms,
+                    end_ms=current,
+                    archive=archive,
+                )
+        except (NotImplementedError, RuntimeError, TimeoutError, ConnectionError):
+            return [], False, "EXIT_FILL_DATA_UNAVAILABLE"
+
+        unique = {self._fill_key(row): row for row in rows}
+        matching = [
+            row for row in unique.values()
+            if str(row.get("side", "")).lower() == "sell"
+            and str(row.get("ordId") or row.get("algoId") or "") in protective_ids
+        ]
+        matching.sort(key=lambda row: int(row.get("fillTime") or row.get("ts") or 0))
+        return matching, complete, "PASS" if complete else "EXIT_FILL_HISTORY_INCOMPLETE"
+
+    def _normalized_exit_fills(self, fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for row in fills:
+            normalized.append({
+                "fill_key": self._fill_key(row),
+                "order_id": str(row.get("ordId") or row.get("algoId") or "") or None,
+                "fill_timestamp_ms": int(row.get("fillTime") or row.get("ts") or 0),
+                "quantity": float(row.get("fillSz") or row.get("sz") or 0),
+                "price": float(row.get("fillPx") or row.get("px") or 0),
+                "fee": abs(float(row["fee"])) if row.get("fee") not in (None, "") else None,
+                "fee_currency": str(row.get("feeCcy") or "UNKNOWN"),
+            })
+        return normalized
+
+    @staticmethod
+    def _fee_breakdown(fills: list[dict[str, Any]]) -> tuple[dict[str, float], bool]:
+        breakdown: dict[str, float] = {}
+        complete = True
+        for row in fills:
+            value = row.get("fee")
+            if value in (None, ""):
+                complete = False
+                continue
+            currency = str(row.get("feeCcy") or "UNKNOWN")
+            breakdown[currency] = breakdown.get(currency, 0.0) + abs(float(value))
+        return breakdown, complete
+
+    def _record_reconciliation(self, result: dict[str, Any], symbol: str) -> dict[str, Any]:
+        code = str(result.get("reason") or result.get("state") or "UNKNOWN")
+        self.store.record_reconciliation_event(
+            str(result.get("plan_id")) if result.get("plan_id") else None,
+            symbol,
+            code,
+            {key: value for key, value in result.items() if key not in {"raw", "response"}},
+        )
+        return result
+
     def reconcile_managed_positions(self) -> list[dict[str, Any]]:
         """Close managed positions only from fills linked to persisted protective order IDs."""
         results: list[dict[str, Any]] = []
@@ -213,38 +374,90 @@ class OrderManager:
             except (TypeError, ValueError, json.JSONDecodeError):
                 protective_ids = set()
             if not protective_ids:
-                results.append({"plan_id": position.plan_id, "found": False,
-                                "reason": "PROTECTIVE_ORDER_LINK_UNAVAILABLE"})
+                results.append(self._record_reconciliation(
+                    {"plan_id": position.plan_id, "found": False,
+                     "reason": "PROTECTIVE_ORDER_LINK_UNAVAILABLE"},
+                    position.symbol,
+                ))
                 continue
-            try:
-                fills = [row for row in _rows(self.executor.backend.get_fills(position.symbol))
-                         if str(row.get("side", "")).lower() == "sell"
-                         and str(row.get("ordId") or row.get("algoId") or "") in protective_ids]
-            except Exception:
-                results.append({"plan_id": position.plan_id, "found": False,
-                                "reason": "EXIT_FILL_DATA_UNAVAILABLE"})
+            cursor_kind = f"protective_exit_fills:{position.plan_id}"
+            cursor = self.store.reconciliation_cursor(position.symbol, cursor_kind)
+            begin_ms = max(
+                position.opened_at_ms,
+                int(cursor.get("last_timestamp_ms") or position.opened_at_ms) if cursor else position.opened_at_ms,
+            )
+            fills, history_complete, history_reason = self._load_exit_fills(
+                position.symbol,
+                begin_ms,
+                protective_ids,
+            )
+            if not history_complete:
+                results.append(self._record_reconciliation(
+                    {"plan_id": position.plan_id, "found": bool(fills),
+                     "reason": history_reason, "state": position.state},
+                    position.symbol,
+                ))
                 continue
-            quantity = sum(float(row.get("fillSz") or row.get("sz") or 0) for row in fills)
+            normalized = self._normalized_exit_fills(fills)
+            self.store.record_reconciled_exit_fills(position.plan_id, normalized)
+            if normalized:
+                newest = max(normalized, key=lambda row: int(row["fill_timestamp_ms"]))
+                self.store.update_reconciliation_cursor(
+                    position.symbol,
+                    cursor_kind,
+                    int(newest["fill_timestamp_ms"]),
+                    str(newest["fill_key"]),
+                )
+            persisted = self.store.reconciled_exit_fills(position.plan_id)
+            quantity = sum(float(row["quantity"]) for row in persisted)
+            fee_breakdown, fees_complete = self._fee_breakdown([
+                {"fee": row["fee"], "feeCcy": row["fee_currency"]}
+                for row in persisted
+            ])
             if quantity + 1e-12 < position.quantity:
-                results.append({"plan_id": position.plan_id, "found": bool(fills),
-                                "state": "EXIT_PARTIALLY_FILLED" if fills else position.state,
-                                "filled_size": quantity})
+                if persisted:
+                    self.store.mark_managed_partial_exit(position.plan_id, quantity, fee_breakdown)
+                results.append(self._record_reconciliation(
+                    {"plan_id": position.plan_id, "found": bool(persisted),
+                     "state": "EXIT_PARTIALLY_FILLED" if persisted else position.state,
+                     "filled_size": quantity, "fee_breakdown": fee_breakdown},
+                    position.symbol,
+                ))
                 continue
             weighted = sum(
-                float(row.get("fillPx") or row.get("px") or 0)
-                * float(row.get("fillSz") or row.get("sz") or 0) for row in fills
+                float(row["price"]) * float(row["quantity"]) for row in persisted
             )
             exit_price = weighted / quantity if quantity > 0 else 0
-            fee_values = [row.get("fee") for row in fills]
+            quote_currency = position.symbol.split("-")[-1].upper()
             exit_fees = (
-                sum(float(value) for value in fee_values)
-                if fee_values and all(value not in (None, "") for value in fee_values) else None
+                fee_breakdown[quote_currency]
+                if fees_complete and set(fee_breakdown) == {quote_currency}
+                else None
             )
-            timestamps = [int(row.get("fillTime") or row.get("ts") or now_ms()) for row in fills]
-            exit_order_id = str(fills[-1].get("ordId") or fills[-1].get("algoId") or "") or None
-            self.store.close_trade(position.plan_id, max(timestamps), exit_price, exit_fees, exit_order_id)
-            results.append({"plan_id": position.plan_id, "found": True,
-                            "state": OrderState.CLOSED.value, "exit_order_id": exit_order_id})
+            conversion_required = fees_complete and bool(fee_breakdown) and set(fee_breakdown) != {quote_currency}
+            timestamps = [int(row["fill_timestamp_ms"]) for row in persisted]
+            exit_order_id = str(persisted[-1].get("order_id") or "") or None
+            self.store.close_trade(
+                position.plan_id,
+                max(timestamps),
+                exit_price,
+                exit_fees,
+                exit_order_id,
+                exit_filled_quantity=quantity,
+                exit_fee_breakdown=fee_breakdown,
+                exit_fee_conversion_required=conversion_required,
+            )
+            results.append(self._record_reconciliation(
+                {"plan_id": position.plan_id, "found": True,
+                 "state": OrderState.CLOSED.value, "exit_order_id": exit_order_id,
+                 "fee_breakdown": fee_breakdown,
+                 "fee_status": (
+                     "ACTUAL" if exit_fees is not None
+                     else "CURRENCY_CONVERSION_REQUIRED" if conversion_required
+                     else "UNKNOWN"
+                 )},
+                position.symbol,
+            ))
         return results
 
     def query(self, symbol: str, order_id: str) -> dict[str, Any]:

@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from storage.control_store import ControlStore
 from tests.test_approval_revalidation import agent
@@ -46,6 +47,7 @@ def service_for(tmp_path, market, account) -> TradingService:
         start_scheduler=False,
     )
     service.client_stream_connected("test-control-stream")
+    service.client_stream_acknowledged("test-control-stream")
     return service
 
 
@@ -58,6 +60,7 @@ def test_startup_always_disarms_and_disables_auto_demo(tmp_path, market, account
         agent_runtime_state=AgentRuntimeState.RUNNING,
         trading_mode=TradingMode.AUTO,
         auto_demo_enabled=True,
+        scan_interval_seconds=45,
     )
     store.close()
 
@@ -68,7 +71,27 @@ def test_startup_always_disarms_and_disables_auto_demo(tmp_path, market, account
         assert state["agent_runtime_state"] == "STOPPED"
         assert state["trading_mode"] == "STOPPED"
         assert state["auto_demo_enabled"] is False
+        assert state["scan_interval_seconds"] == 45
         assert service._orchestrator.state.execution_armed is False
+    finally:
+        service.close()
+
+
+def test_active_kill_switch_persists_across_restart(tmp_path, market, account) -> None:
+    store = ControlStore(tmp_path / "trading_agent.db")
+    store.reset_for_startup()
+    store.transition("PREVIOUS_KILL", kill_switch_active=True, scan_interval_seconds=30)
+    store.close()
+
+    service = service_for(tmp_path, market, account)
+    try:
+        state = service.control()
+        assert state["kill_switch_active"] is True
+        assert state["execution_state"] == "DISARMED"
+        assert state["agent_runtime_state"] == "STOPPED"
+        assert state["scan_interval_seconds"] == 30
+        with pytest.raises(ServiceError, match="KILL_SWITCH_ACTIVE"):
+            service.start_agent()
     finally:
         service.close()
 
@@ -148,7 +171,7 @@ def test_approval_endpoint_accepts_plan_id_not_client_order_fields(tmp_path, mar
             client.get("/api/v1/session")
             schema = client.get("/api/v1/openapi.json").json()
             properties = schema["components"]["schemas"]["ApprovalRequest"]["properties"]
-            assert set(properties) == {"confirmation"}
+            assert set(properties) == {"approval_challenge"}
             required_paths = {
                 "/api/v1/status", "/api/v1/health", "/api/v1/account",
                 "/api/v1/scanner", "/api/v1/scanner/run", "/api/v1/analyze/{symbol}",
@@ -162,6 +185,46 @@ def test_approval_endpoint_accepts_plan_id_not_client_order_fields(tmp_path, mar
                 "/api/v1/plans/{plan_id}/reject",
             }
             assert required_paths.issubset(schema["paths"])
+    finally:
+        service.close()
+
+
+def test_duplicate_browser_approval_consumes_challenge_once(tmp_path, market, account) -> None:
+    service = service_for(tmp_path, market, account)
+    app = create_app(service)
+    calls: list[tuple[str, dict]] = []
+
+    def approve_once(plan_id: str, preview: dict) -> dict:
+        calls.append((plan_id, preview))
+        return {"plan_id": plan_id, "status": "SUBMITTED"}
+
+    service.approve_plan_with_challenge = approve_once  # type: ignore[method-assign]
+    try:
+        with TestClient(app) as client:
+            csrf = client.get("/api/v1/session").json()["csrf_token"]
+            cookie = client.cookies.get("okx_dashboard_session")
+            challenge = app.state.sessions.create_approval_challenge(
+                cookie,
+                "plan-1",
+                {"status": "READY_FOR_EXACT_APPROVAL", "position_size": .01},
+            )
+            body = {"approval_challenge": challenge["approval_challenge"]}
+            headers = {"X-CSRF-Token": csrf}
+            with client.websocket_connect(
+                "/api/v1/ws", headers={"origin": "http://testserver"},
+            ) as websocket:
+                event = websocket.receive_json()
+                websocket.send_json({"type": "heartbeat.ack", "sequence": event["sequence"]})
+                websocket.receive_json()
+                assert client.post(
+                    "/api/v1/plans/plan-1/approve", headers=headers, json=body,
+                ).status_code == 200
+                duplicate = client.post(
+                    "/api/v1/plans/plan-1/approve", headers=headers, json=body,
+                )
+                assert duplicate.status_code == 409
+                assert duplicate.json()["error"]["code"] == "APPROVAL_CHALLENGE_INVALID_OR_USED"
+            assert len(calls) == 1
     finally:
         service.close()
 
@@ -181,9 +244,31 @@ def test_fresh_authenticated_websocket_unlocks_high_risk_route(tmp_path, market,
             ) as websocket:
                 event = websocket.receive_json()
                 assert event["type"] in {"snapshot", "snapshot.error"}
+                assert client.post("/api/v1/agent/start", headers=headers).status_code == 423
+                websocket.send_json({"type": "heartbeat.ack", "sequence": event["sequence"]})
+                websocket.receive_json()
                 assert client.post("/api/v1/agent/start", headers=headers).status_code == 200
                 assert client.post("/api/v1/execution/arm", headers=headers).status_code == 200
             assert client.post("/api/v1/agent/start", headers=headers).status_code == 423
+    finally:
+        service.close()
+
+
+def test_malformed_websocket_message_closes_without_control_action(tmp_path, market, account) -> None:
+    service = service_for(tmp_path, market, account)
+    app = create_app(service)
+    try:
+        with TestClient(app) as client:
+            client.get("/api/v1/session")
+            with client.websocket_connect(
+                "/api/v1/ws", headers={"origin": "http://testserver"},
+            ) as websocket:
+                websocket.receive_json()
+                websocket.send_json({"type": "arm", "sequence": 0})
+                with pytest.raises(WebSocketDisconnect) as closed:
+                    websocket.receive_json()
+                assert closed.value.code == 4400
+            assert service.control()["execution_state"] == "DISARMED"
     finally:
         service.close()
 
@@ -293,8 +378,27 @@ def test_multiple_authenticated_websockets_do_not_clear_each_other() -> None:
     session = manager.create()
     first = manager.register_websocket(session.cookie)
     second = manager.register_websocket(session.cookie)
+    assert not manager.websocket_fresh(session.cookie)
+    assert manager.acknowledge_websocket(session.cookie, first, 0)
     assert manager.websocket_fresh(session.cookie)
     manager.clear_websocket(session.cookie, first)
+    assert not manager.websocket_fresh(session.cookie)
+    assert manager.acknowledge_websocket(session.cookie, second, 0)
     assert manager.websocket_fresh(session.cookie)
     manager.clear_websocket(session.cookie, second)
+    assert not manager.websocket_fresh(session.cookie)
+
+
+def test_client_ack_becomes_stale_after_eight_seconds(monkeypatch) -> None:
+    import trading_agent.web_api.security as security
+
+    clock = [100.0]
+    monkeypatch.setattr(security.time, "monotonic", lambda: clock[0])
+    manager = SessionManager()
+    session = manager.create()
+    connection = manager.register_websocket(session.cookie)
+    assert manager.acknowledge_websocket(session.cookie, connection, 0)
+    clock[0] = 108.0
+    assert manager.websocket_fresh(session.cookie)
+    clock[0] = 108.001
     assert not manager.websocket_fresh(session.cookie)

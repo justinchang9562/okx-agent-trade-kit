@@ -1,4 +1,5 @@
 environment: demo
+strategy_version: scalping_v1_baseline
 
 market:
   instrument_type: spot
@@ -46,6 +47,10 @@ execution:
 
 approval:
   require_user_confirmation: true
+  challenge_ttl_seconds: 15
+  max_preview_price_change_pct: 0.15
+  max_preview_size_change_pct: 1.0
+  max_preview_risk_change_pct: 1.0
 
 backtest:
   fee_pct: 0.001

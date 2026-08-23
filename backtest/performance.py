@@ -22,10 +22,15 @@ def calculate_performance(trades: list[SimulatedTrade], initial_equity: float) -
     equity = initial_equity
     peak = initial_equity
     max_drawdown = 0.0
-    for value in pnls:
+    equity_curve = [{"timestamp_ms": 0, "value": initial_equity}]
+    drawdown_curve = [{"timestamp_ms": 0, "value": 0.0}]
+    for trade, value in zip(trades, pnls, strict=True):
         equity += value
         peak = max(peak, equity)
-        max_drawdown = max(max_drawdown, (peak - equity) / peak if peak else 0.0)
+        drawdown = (peak - equity) / peak if peak else 0.0
+        max_drawdown = max(max_drawdown, drawdown)
+        equity_curve.append({"timestamp_ms": trade.exit_timestamp_ms, "value": equity})
+        drawdown_curve.append({"timestamp_ms": trade.exit_timestamp_ms, "value": drawdown})
     returns = [value / initial_equity for value in pnls]
     deviation = pstdev(returns) if len(returns) > 1 else 0.0
     downside = [min(value, 0.0) for value in returns]
@@ -49,4 +54,6 @@ def calculate_performance(trades: list[SimulatedTrade], initial_equity: float) -
         "fees_paid": sum(trade.fees for trade in trades),
         "slippage_cost": sum(trade.slippage_cost for trade in trades),
         "ending_equity": initial_equity + sum(pnls),
+        "equity_curve": equity_curve,
+        "drawdown_curve": drawdown_curve,
     }

@@ -49,7 +49,18 @@ class BaseBackend(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_fills(self, symbol: str | None = None) -> dict[str, Any]:
+    def get_fills(
+        self,
+        symbol: str | None = None,
+        *,
+        after: str | None = None,
+        before: str | None = None,
+        order_id: str | None = None,
+        begin_ms: int | None = None,
+        end_ms: int | None = None,
+        archive: bool = False,
+        limit: int = 100,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -63,7 +74,16 @@ class BaseBackend(ABC):
         raise NotImplementedError("TP_SL_BACKEND_NOT_SUPPORTED")
 
     def capabilities(self) -> dict[str, Any]:
-        return {"client_order_id": False, "attached_tp_sl": False, "historical_pagination": False}
+        return {
+            "client_order_id": False,
+            "attached_tp_sl": False,
+            "historical_pagination": False,
+            "fills_pagination": False,
+            "fill_order_lookup": False,
+            "fills_time_window": False,
+            "fills_archive": False,
+            "concurrent_read_only": False,
+        }
 
     @abstractmethod
     def place_order(self, order: dict[str, Any]) -> dict[str, Any]:

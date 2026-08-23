@@ -1,4 +1,4 @@
-# OKX Agent Trade Kit — Core v0.2.1
+# OKX Agent Trade Kit — Core v0.3.0
 
 这是一个确定性的分钟级现货短线交易系统；当前运行路径使用已配置的 **OKX 模拟交易 MCP**。它遵循路径 B：Codex 仅作为控制与开发界面，交易决策由本地 Python 流水线完成。
 
@@ -49,10 +49,19 @@ uv run python -m trading_agent recover
 uv run python -m trading_agent backtest BTC-USDT
 uv run python -m trading_agent backtest BTC-USDT --days 30
 uv run python -m trading_agent walk-forward BTC-USDT --days 7
+uv run python scripts/verify_demo_lifecycle.py --symbol BTC-USDT
+uv run python scripts/run_research_evaluation.py
 uv run pytest
 ```
 
+Demo 生命周期验证器默认仅执行 PRECHECK 并导出脱敏预览，不会下单；研究命令只使用独立的公共只读后端。真实 Demo
+生命周期必须由用户另行提供双重显式授权，且默认测试/CI 永远排除该路径。
+
 ## 本地网页仪表板 v2.1
+
+项目发布版本与 Dashboard 工作流版本是两个不同维度：当前 hardened Core/项目发布版本为
+`v0.3.0`，本地网页产品工作流名称继续保留为 `Dashboard v2.1`。前端包版本与项目发布版本同步为
+`0.3.0`，界面应显示为 `Dashboard v2.1 / Core v0.3.0`，避免把工作流版本误认为发布版本。
 
 完成上述一次性安装后，可通过一条本地命令同时启动 API 与已构建的仪表板：
 
@@ -62,13 +71,13 @@ uv run python -m trading_agent.web_server
 
 打开 `http://127.0.0.1:8000`。支持的服务器仅绑定回环地址，并以单进程/单 worker 运行，使用唯一权威的 `TradingOrchestrator`。若缺少前端构建产物，该命令会先行构建；修改前端源码后，请使用 `uv run python -m trading_agent.web_server --rebuild-frontend`。
 
-页面提供健康状态、账户/敞口、Scanner、Signals、TradePlans、Orders、Positions、Trades、Backtest/Walk-Forward、已脱敏日志、设置及带审计记录的控制界面。每次后端重启后，模拟执行均以 `DISARMED` 状态启动。ARM、代理启动、AUTO 和审批均要求已认证且新鲜的 WebSocket；断开或连接过期时会以关闭失败（fail closed）的方式处理。审批只接受已持久化的 `plan_id`，并调用现有完整 Core 重新验证路径。AUTO DEMO 必须输入明确短语，默认禁用，且重启后绝不恢复。Kill Switch 会停止新入场/AUTO 并解除武装，但不会移除现有的 TP/SL 保护。
+页面提供健康状态、账户/敞口、Scanner、Signals、TradePlans、Orders、Positions、Trades、Backtest/Walk-Forward、已脱敏日志、设置及带审计记录的控制界面。每次后端重启后，模拟执行均以 `DISARMED` 状态启动。ARM、代理启动、AUTO 和审批均要求已认证且新鲜的客户端 WebSocket ACK；只有服务器成功发送数据不会刷新控制面资格。Web 审批使用绑定 session/plan/preview 的 15 秒一次性 challenge，最终 API 不接受订单参数，并仍调用完整 Core 复核。AUTO DEMO 必须输入明确短语，默认禁用，且重启后绝不恢复。Kill Switch 会停止新入场/AUTO 并解除武装、跨重启保持 ACTIVE，但不会移除现有的 TP/SL 保护。
 
 实盘仍为 `LIVE_NOT_CONFIGURED / LOCKED`；W8 尚未实现。请参阅[网页仪表板兼容性](docs/web-dashboard-compatibility.md)和 [API/WebSocket v1](docs/web-dashboard-api-v1.md)。
 
 `dry-run` 会获取最新模拟市场数据与账户状态，计算完整计划，但绝不会调用订单提交。`analyze` 会持久化一个带可配置 TTL 的可执行计划。唯一的执行入口是 `approve PLAN_ID`：未提供精确确认语时，仅生成最新的执行预览；提供精确确认语后，系统会重新获取市场/账户状态，并在 `OrderManager` 能够提交订单之前，再次执行陈旧数据、价差、敞口、单日亏损、连续亏损、重复、仓位规模、TTL、价格偏离和提交前滑点等保护检查。最终的委托价、止损和止盈将按照 OKX `tickSz` 做 Decimal 精度量化；最终的风险回报比、数量和风险金额会基于这些可执行价格重新计算。`STOPPED` 运行时状态会在编排层和最终执行器边界阻止一切新入场，但不移除已有保护订单。
 
-回测使用分页、完整性检查过的真实 OKX 历史 OHLCV，配合被忽略的本地缓存、生产级指标/策略/风控/仓位规模、下一根 K 线开盘执行、可注入的手续费/价差/滑点模型，以及同一根 K 线内止损与目标价的保守排序。支持获取 7、30 和 90 天的数据。基础 walk-forward 路径报告滚动的样本外窗口，不进行参数调优。
+回测使用分页、完整性检查过的真实 OKX 历史 OHLCV，配合被忽略的本地缓存、生产级指标/策略/风控/仓位规模、下一根 K 线开盘执行、可注入的手续费/价差/滑点模型，以及同一根 K 线内止损与目标价的保守排序。下一根开盘可见后会共享生产审批的纯函数重新量化 RR 与仓位，失效交易按原因跳过。回测运行在独立 worker 与无凭据只读 MCP 进程上，Execution ARMED 时禁止启动。支持获取 7、30 和 90 天的数据。基础 walk-forward 路径报告滚动的样本外窗口，不进行参数调优。
 
 ## 数据、监控与安全
 
@@ -77,3 +86,9 @@ SQLite `trading_agent.db` 存储计划、持久化订单状态转换、受管理
 流水线会验证时间戳、数据时效性、缺失数据、价格、OHLC 完整性、K 线数量、价差、止损、目标价、风险回报比、仓位精度、最小数量、账户敞口、受管理仓位、单日亏损、连续亏损、冷却时间、重复计划、审批、模拟盘身份和实盘门禁。提交结果不确定时会被持久化，并按客户端订单 ID 对账，而非盲目重试。已成交入场但未验证保护订单的仓位将变为 `POSITION_UNPROTECTED`。系统会区分明确的本地或交易所拒绝，与可能已到达 OKX 的失败。生命周期状态转换使用原子 CAS；SQLite 仓库和 MCP stdio 通道以有限等待时间串行化共享访问。健康检查会将系统能力与当前交易资格分开报告。发生故障时会产生 HOLD/REJECT，且不会提交订单。
 
 请参阅[架构](docs/architecture.md)、[策略](docs/strategy.md)、[风控措施](docs/risk-management.md)、[执行后端](docs/execution-backends.md)、[命令](docs/commands.md)和[从模拟盘到实盘](docs/demo-to-live.md)。
+
+## 安全与发布
+
+本项目只支持绑定 `127.0.0.1` 的 Demo 控制面；Live 仍为锁定且未实现。不要提交 OKX
+凭据、`.env`、数据库、日志、缓存或 audit export。公开仓库威胁模型与漏洞报告方式见
+[SECURITY.md](SECURITY.md)，发布前必须完成 [release checklist](docs/release-checklist.md)。

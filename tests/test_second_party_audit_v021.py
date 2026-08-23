@@ -9,8 +9,8 @@ from types import MethodType
 import pytest
 
 from data.models import AccountSnapshot, Balance
-from execution.errors import PreSubmitRejectedError, StateChangedError, SubmissionUncertainError
 from execution.demo_executor import DemoExecutor
+from execution.errors import PreSubmitRejectedError, StateChangedError, SubmissionUncertainError
 from execution.mcp_backend import MCPError, StdioMCPClient
 from execution.order_manager import OrderManager
 from execution.order_state import OrderState
@@ -160,7 +160,7 @@ def test_linked_protective_exit_fill_is_reconciled_to_closed(tmp_path, long_sign
                           "fillPx": "101", "fee": ".01", "fillTime": str(now_ms() + 1000)})
     partial = manager.reconcile_managed_positions()[0]
     assert partial["state"] == "EXIT_PARTIALLY_FILLED"
-    assert store.managed_positions()[0].state == OrderState.FILLED.value
+    assert store.managed_positions()[0].state == OrderState.EXIT_PARTIALLY_FILLED.value
     backend.fills.append({"ordId": "exit-1", "side": "sell", "fillSz": ".006",
                           "fillPx": "101", "fee": ".01", "fillTime": str(now_ms() + 2000)})
     result = manager.reconcile_managed_positions()[0]
@@ -186,7 +186,8 @@ def test_order_transition_uses_compare_and_swap_and_blocks_backward_state(tmp_pa
         )
     with pytest.raises(RuntimeError, match="INVALID_ORDER_TRANSITION"):
         first.transition_order(plan.plan_id, OrderState.SUBMITTED.value)
-    first.close(); second.close()
+    first.close()
+    second.close()
 
 
 def test_concurrent_cas_writers_allow_exactly_one_transition(tmp_path, long_signal) -> None:
@@ -211,10 +212,13 @@ def test_concurrent_cas_writers_allow_exactly_one_transition(tmp_path, long_sign
         threading.Thread(target=transition, args=(stores[0], OrderState.OPEN.value)),
         threading.Thread(target=transition, args=(stores[1], OrderState.PARTIALLY_FILLED.value)),
     ]
-    for thread in threads: thread.start()
-    for thread in threads: thread.join()
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
     assert sorted(outcomes) == ["lost", "won"]
-    for store in stores: store.close()
+    for store in stores:
+        store.close()
 
 
 class ClassifiedExecutor:
@@ -308,7 +312,8 @@ def test_schema_migration_is_versioned_and_preserves_existing_data(tmp_path) -> 
         opened_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, closed_at_ms INTEGER);
       INSERT INTO signals VALUES (1, 1, 'BTC-USDT', 8, .8, 'BUY', '[]');
     """)
-    legacy.commit(); legacy.close()
+    legacy.commit()
+    legacy.close()
     migrated = connect(path)
     columns = {row["name"] for row in migrated.execute("PRAGMA table_info(managed_positions)")}
     assert schema_version(migrated) == LATEST_SCHEMA_VERSION
@@ -343,8 +348,10 @@ def test_stdio_mcp_requests_are_serialized() -> None:
     client._write = MethodType(write, client)
     client._read_response = MethodType(read, client)
     threads = [threading.Thread(target=client._request, args=("test", {})) for _ in range(4)]
-    for thread in threads: thread.start()
-    for thread in threads: thread.join()
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
     assert maximum == 1 and ids == [1, 2, 3, 4]
 
 
@@ -358,5 +365,5 @@ def test_mcp_tool_error_does_not_echo_sensitive_stderr_or_payload() -> None:
     assert "SHOULD_NOT_APPEAR" not in str(raised.value)
 
 
-def test_component_version_is_v021() -> None:
-    assert __version__ == "0.2.1"
+def test_component_version_tracks_remediation_release() -> None:
+    assert __version__ == "0.3.0"

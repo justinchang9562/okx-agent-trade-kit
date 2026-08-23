@@ -31,3 +31,27 @@ AUTO DEMO is implemented through the Web runtime but is disabled on every
 startup and requires its exact enable phrase, an authenticated fresh WebSocket,
 Agent RUNNING and execution ARMED. It does not weaken the normal TradePlan,
 revalidation, Risk Manager, idempotency or DemoExecutor path. Live is locked.
+
+The controlled Demo lifecycle verifier is read-only by default:
+
+```bash
+uv run python scripts/verify_demo_lifecycle.py --symbol BTC-USDT
+uv run python scripts/verify_demo_lifecycle.py --resume-plan PLAN_ID
+```
+
+The first command performs health, Demo identity, capability, market, account,
+risk, sizing and preview checks and writes a redacted audit export. It never calls
+`place_order`. Real Demo submission requires both `--submit-real-demo` and the
+exact confirmation phrase documented by `--help`; it is intentionally excluded
+from CI and was not executed as part of v0.3.0 remediation.
+
+The research-only evaluation matrix is:
+
+```bash
+uv run python scripts/run_research_evaluation.py
+```
+
+It compares the frozen baseline and registered research candidates using an
+independent public read-only backend for BTC/ETH/SOL across 7/30/90 days, cost
+stress scenarios and rolling walk-forward windows. It never promotes a strategy
+or submits an order.

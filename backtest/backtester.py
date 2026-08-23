@@ -6,16 +6,17 @@ from typing import Any
 
 from backtest.cost_models import FixedFeeModel, FixedSlippageModel, FixedSpreadModel
 from backtest.performance import calculate_performance
+from backtest.regimes import regime_performance
 from backtest.simulator import SimulatedTrade
 from backtest.walk_forward import windows
 from data.historical import HistoricalDataService
 from data.models import AccountSnapshot, Balance, Candle, Instrument, MarketSnapshot
 from execution.base_backend import BaseBackend
 from risk.daily_limits import DailyRiskState
+from risk.execution_revalidation import build_executable_long_plan
 from risk.exposure import ExposureSnapshot
-from risk.position_sizing import calculate_position_size
 from risk.risk_manager import RiskManager
-from strategies.scalping_strategy import ScalpingStrategy
+from strategies.registry import PRODUCTION_STRATEGY_VERSION, build_strategy
 
 
 def _rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -26,10 +27,22 @@ def _rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 class Backtester:
-    def __init__(self, backend: BaseBackend, rules: dict, cache_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        backend: BaseBackend,
+        rules: dict,
+        cache_root: Path | None = None,
+        *,
+        strategy_version: str | None = None,
+        allow_research_strategy: bool = False,
+    ) -> None:
         self.backend = backend
         self.rules = rules
-        self.strategy = ScalpingStrategy(rules)
+        self.strategy = build_strategy(
+            strategy_version or str(rules.get("strategy_version", PRODUCTION_STRATEGY_VERSION)),
+            rules,
+            production=not allow_research_strategy,
+        )
         self.risk = RiskManager(rules)
         self.cache_root = cache_root or Path("data_cache")
 
@@ -47,7 +60,7 @@ class Backtester:
     def _simulate(
         self, symbol: str, frames: dict[str, tuple[Candle, ...]], instrument: Instrument,
         evaluation_start_ms: int | None = None,
-    ) -> tuple[list[SimulatedTrade], float]:
+    ) -> tuple[list[SimulatedTrade], float, dict[str, int]]:
         config = self.rules["backtest"]
         initial_equity = float(config["initial_equity"])
         equity = initial_equity
@@ -60,6 +73,7 @@ class Backtester:
         consecutive_losses = 0
         last_trade_ms: int | None = None
         active_day: str | None = None
+        skipped_after_execution_revalidation: dict[str, int] = {}
         index = 50
         if evaluation_start_ms is not None:
             index = max(index, next((i for i, item in enumerate(primary) if item.timestamp_ms >= evaluation_start_ms), len(primary)))
@@ -97,18 +111,39 @@ class Backtester:
             if not risk.approved or signal.suggested_stop is None or signal.suggested_take_profit is None:
                 index += 1
                 continue
-            sizing = calculate_position_size(
-                account, instrument, signal.entry_price, signal.suggested_stop,
-                float(self.rules["risk"]["risk_per_trade"]), float(self.rules["risk"]["max_position_pct"]),
-            )
-            if not sizing.approved:
-                index += 1
-                continue
             # Signal is generated on candle close; execution begins at the next candle open.
             execution_bar = primary[index + 1]
             buy_slip = slippage_model.pct(execution_bar.timestamp_ms, "buy")
             entry_reference = execution_bar.open * (1 + spread)
             entry = entry_reference * (1 + buy_slip)
+            execution_market = MarketSnapshot(
+                symbol=symbol,
+                timestamp_ms=execution_bar.timestamp_ms,
+                price=execution_bar.open,
+                bid=execution_bar.open * (1 - spread),
+                ask=entry,
+                volume_24h=0.0,
+                candles=visible,
+                instrument=instrument,
+            )
+            revalidation = build_executable_long_plan(
+                signal,
+                execution_market,
+                account,
+                state,
+                self.rules,
+                executable_entry=entry,
+                exposure=exposure,
+                risk_manager=self.risk,
+                evaluation_timestamp_ms=execution_bar.timestamp_ms,
+            )
+            if not revalidation.approved:
+                skipped_after_execution_revalidation[revalidation.reason] = (
+                    skipped_after_execution_revalidation.get(revalidation.reason, 0) + 1
+                )
+                index += 1
+                continue
+            sizing = revalidation.sizing
             exit_price = primary[-1].close
             exit_reference = exit_price * (1 - spread)
             exit_index = len(primary) - 1
@@ -116,13 +151,13 @@ class Backtester:
             for future_index in range(index + 1, len(primary)):
                 future = primary[future_index]
                 # If both touch in one candle, use the adverse outcome to avoid optimistic ordering.
-                if future.low <= signal.suggested_stop:
-                    exit_reference = signal.suggested_stop * (1 - spread)
+                if future.low <= revalidation.stop:
+                    exit_reference = revalidation.stop * (1 - spread)
                     exit_index = future_index
                     outcome = "STOP"
                     break
-                if future.high >= signal.suggested_take_profit:
-                    exit_reference = signal.suggested_take_profit * (1 - spread)
+                if future.high >= revalidation.take_profit:
+                    exit_reference = revalidation.take_profit * (1 - spread)
                     exit_index = future_index
                     outcome = "TAKE_PROFIT"
                     break
@@ -146,7 +181,7 @@ class Backtester:
             consecutive_losses = consecutive_losses + 1 if pnl < 0 else 0
             last_trade_ms = exit_time
             index = exit_index + 1
-        return trades, initial_equity
+        return trades, initial_equity, skipped_after_execution_revalidation
 
     def run(self, symbol: str, days: int = 7) -> dict[str, Any]:
         service = HistoricalDataService(
@@ -160,7 +195,7 @@ class Backtester:
             )
             integrity[timeframe] = report.__dict__
         instrument = self._instrument(self.backend.get_instrument(symbol), symbol)
-        trades, initial_equity = self._simulate(symbol, frames, instrument)
+        trades, initial_equity, skipped = self._simulate(symbol, frames, instrument)
         config = self.rules["backtest"]
         return {
             "symbol": symbol, "source": "OKX_DEMO_MCP_HISTORICAL_OHLCV_PAGINATED",
@@ -172,7 +207,10 @@ class Backtester:
                 "execution_timing": "NEXT_BAR_OPEN", "same_bar_stop_target": "STOP_FIRST_CONSERVATIVE",
             },
             "risk_manager": "PRODUCTION_RISK_MANAGER_WITH_HISTORICAL_STATE",
+            "skipped_after_execution_revalidation": sum(skipped.values()),
+            "skip_reason_breakdown": skipped,
             "performance": calculate_performance(trades, initial_equity),
+            "regime_performance": regime_performance(trades, frames["1m"], initial_equity),
             "trades": [trade.__dict__ for trade in trades],
         }
 
@@ -193,12 +231,16 @@ class Backtester:
             for timeframe in ("3m", "5m"):
                 sliced[timeframe] = tuple(item for item in frames[timeframe] if start_ms <= item.timestamp_ms <= end_ms)
             evaluation_start = frames["1m"][window.test_start].timestamp_ms
-            trades, initial = self._simulate(symbol, sliced, instrument, evaluation_start_ms=evaluation_start)
+            trades, initial, skipped = self._simulate(
+                symbol, sliced, instrument, evaluation_start_ms=evaluation_start,
+            )
             result.append({
                 "window": window.__dict__, "train_role": "WARMUP_AND_FIXED_RULE_EVALUATION_NO_TUNING",
                 "out_of_sample_start_ms": evaluation_start,
                 "out_of_sample_end_ms": frames["1m"][window.test_end - 1].timestamp_ms,
                 "performance": calculate_performance(trades, initial),
+                "skipped_after_execution_revalidation": sum(skipped.values()),
+                "skip_reason_breakdown": skipped,
             })
         return {"symbol": symbol, "days": days, "method": "ROLLING_WALK_FORWARD_NO_OPTIMIZER",
                 "windows": result}

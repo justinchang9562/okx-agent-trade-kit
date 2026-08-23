@@ -18,7 +18,7 @@ const en = {
   ordersSubtitle: 'Persistent execution states reconciled with the connected backend.',
   positionsSubtitle: 'Wallet exposure and agent-managed positions remain explicitly separate.',
   tradesSubtitle: 'Recorded fills, fees, slippage, and realized performance.',
-  backtestSubtitle: 'Evaluate rule_scalping_v1 without tuning on the evaluation sample.',
+  backtestSubtitle: 'Evaluate scalping_v1_baseline without tuning on the evaluation sample.',
   logsSubtitle: 'Redacted operational evidence and immutable control transitions.',
   settingsSubtitle: 'Runtime controls are separated by risk and audited by default.',
   environment: 'Environment',
@@ -135,7 +135,7 @@ const en = {
   stopPrice: 'Stop',
   takeProfit: 'Take profit',
   cancel: 'Cancel',
-  submitDemo: 'Submit Demo order',
+  submitDemo: 'Approve Demo Trade',
   close: 'Close',
   completed: 'completed',
   startupFailed: 'Startup failed',
@@ -158,7 +158,7 @@ const en = {
 
 const zh: Record<keyof typeof en, string> = {
   product: 'OKX 交易代理', localControl: '本地控制台', overview: '总览', scanner: '市场与信号', approval: '审批中心', orders: '订单生命周期', positions: '持仓', trades: '交易记录', backtest: '回测实验室', logs: '日志与审计', settings: '设置',
-  overviewSubtitle: '从容掌握账户安全、运行状态与风险敞口。', scannerSubtitle: '来自确定性策略流水线的只读市场分析。', approvalSubtitle: '审核由服务端持有的交易计划，每次批准前都会重新验证。', ordersSubtitle: '与已连接后端核对的持久化执行状态。', positionsSubtitle: '钱包资产与代理管理仓位始终明确区分。', tradesSubtitle: '记录成交、费用、滑点与已实现表现。', backtestSubtitle: '在评估样本上验证 rule_scalping_v1，不进行参数调优。', logsSubtitle: '脱敏的运行证据与不可变控制操作记录。', settingsSubtitle: '按风险级别分离运行控制，并默认留下审计记录。',
+  overviewSubtitle: '从容掌握账户安全、运行状态与风险敞口。', scannerSubtitle: '来自确定性策略流水线的只读市场分析。', approvalSubtitle: '审核由服务端持有的交易计划，每次批准前都会重新验证。', ordersSubtitle: '与已连接后端核对的持久化执行状态。', positionsSubtitle: '钱包资产与代理管理仓位始终明确区分。', tradesSubtitle: '记录成交、费用、滑点与已实现表现。', backtestSubtitle: '在评估样本上验证 scalping_v1_baseline，不进行参数调优。', logsSubtitle: '脱敏的运行证据与不可变控制操作记录。', settingsSubtitle: '按风险级别分离运行控制，并默认留下审计记录。',
   environment: '环境', mode: '模式', execution: '执行', stream: '数据流', liveLocked: '实盘已锁定', liveDescription: '实盘执行尚未配置，此界面无法解除锁定。', localOnly: '仅限本机', authoritativeCore: '权威 Python 核心', dismiss: '关闭', writeLock: '写入保护已启用', writeLockDetail: '实时数据流当前不可用，执行授权、交易审批与自动模式均已禁用。',
   equity: '账户权益', demoValuation: '模拟盘估值', available: '可用资金', usdtAvailable: '可用 USDT', managedSlots: '托管仓位', walletExcluded: '不计钱包自有资产', pendingPlans: '待审批计划', ttlBound: '有效期保护', tradingEligibility: '交易资格', ready: '就绪', blocked: '受阻', runtimePosture: '运行状态', independentSafety: '相互独立的安全域', agent: '代理', killSwitch: '紧急停止', accountExposure: '账户敞口', exposureSubtitle: '钱包 + 代理托管 + 预留', dataUnavailable: '暂无可用数据',
   configuredScanner: '已配置市场扫描', strategyOutput: '核心策略输出', runScan: '运行只读扫描', scanEmpty: '运行扫描后即可查看市场决策。', signalHistory: '信号历史', signalScore: '信号评分', signalStrength: '信号强度', risk: '风险', serverPlans: '服务端交易计划', freshRevalidation: '批准前必须重新验证', noPlans: '暂无交易计划。', status: '状态', scoreStrength: '评分 / 强度', entrySize: '入场价 / 数量', reject: '拒绝', revalidateApprove: '重新验证并审批', executionRequirement: '需要新鲜数据流、运行中的代理和已授权执行。',
@@ -168,7 +168,7 @@ const zh: Record<keyof typeof en, string> = {
   runtimeControls: '运行控制', auditedTransitions: '操作 API · 全程审计', liveNotConfigured: '当前版本尚未配置实盘。', tradingMode: '交易模式', modeIndependent: '交易模式与执行授权相互独立。', agentRuntime: '代理运行状态', workerDescription: '扫描与状态核对均由权威工作进程执行。', start: '启动', stop: '停止', demoExecution: '模拟盘执行', armRestart: '执行授权不会跨后端重启保留。', arm: '授权', disarm: '解除授权',
   autoDemo: '自动模拟盘', sessionOnly: '默认关闭 · 仅当前会话', autoDescription: '自动模式必须输入明确启用短语，并始终经过核心信号、风控、仓位、计划与重新验证流程。', typePhrase: '请输入', enable: '启用', disable: '关闭', killDescription: '停止新开仓、自动模式与代理运行；现有保护性止盈止损单将保留。', activateKill: '触发紧急停止', killConfirm: '确认触发紧急停止？现有保护单将继续保留。', resetSafe: '重置为安全停止状态', runtimeSettings: '运行设置', allowlistOnly: '仅允许低风险设置', scanInterval: '扫描间隔（秒）', saveInterval: '保存间隔',
   appearance: '外观', appearanceSubtitle: '偏好仅保存在当前浏览器', language: '语言', chinese: '中文', english: 'English', theme: '颜色主题', system: '跟随系统', light: '浅色', dark: '深色',
-  approveDemo: '批准模拟盘交易', freshPreview: '最新重新验证预览', executablePrice: '可执行价格', positionSize: '仓位数量', riskAmount: '风险金额', stopPrice: '止损价', takeProfit: '止盈价', cancel: '取消', submitDemo: '提交模拟盘订单', close: '关闭', completed: '已完成', startupFailed: '启动失败', marketScan: '市场扫描', planRevalidation: '计划重新验证', planRejection: '拒绝计划', demoApproval: '模拟盘审批', backtestAction: '回测', walkForwardAction: '滚动前向验证', modeAction: '模式', startAgent: '启动代理', stopAgent: '停止代理', armExecution: '授权执行', disarmExecution: '解除执行授权', enableAuto: '启用自动模拟盘', disableAuto: '关闭自动模拟盘', updateInterval: '更新扫描间隔', resetKill: '重置紧急停止',
+  approveDemo: '批准模拟盘交易', freshPreview: '最新重新验证预览', executablePrice: '可执行价格', positionSize: '仓位数量', riskAmount: '风险金额', stopPrice: '止损价', takeProfit: '止盈价', cancel: '取消', submitDemo: '批准模拟盘交易', close: '关闭', completed: '已完成', startupFailed: '启动失败', marketScan: '市场扫描', planRevalidation: '计划重新验证', planRejection: '拒绝计划', demoApproval: '模拟盘审批', backtestAction: '回测', walkForwardAction: '滚动前向验证', modeAction: '模式', startAgent: '启动代理', stopAgent: '停止代理', armExecution: '授权执行', disarmExecution: '解除执行授权', enableAuto: '启用自动模拟盘', disableAuto: '关闭自动模拟盘', updateInterval: '更新扫描间隔', resetKill: '重置紧急停止',
 }
 
 export type TextKey = keyof typeof en

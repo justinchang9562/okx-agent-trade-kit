@@ -1,9 +1,8 @@
-import os
 import pytest
 
+from execution.base_backend import BackendStatus
 from execution.demo_executor import DemoExecutor
 from execution.live_executor import LiveExecutor
-from execution.base_backend import BackendStatus
 
 
 class Backend:

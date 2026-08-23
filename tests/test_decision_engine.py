@@ -1,6 +1,6 @@
+from decision.decision_engine import DecisionEngine
 from risk.position_sizing import SizingResult
 from risk.risk_manager import RiskDecision
-from decision.decision_engine import DecisionEngine
 
 
 def test_decision_buy_and_reject(long_signal) -> None:

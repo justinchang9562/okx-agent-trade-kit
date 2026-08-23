@@ -1,0 +1,31 @@
+production_strategy: scalping_v1_baseline
+
+research_strategies:
+  - scalping_v1_quality_research
+
+evaluation:
+  symbols:
+    - BTC-USDT
+    - ETH-USDT
+    - SOL-USDT
+  windows_days:
+    - 7
+    - 30
+    - 90
+  cost_multipliers:
+    base: 1.0
+    stress_1_5x: 1.5
+    stress_2x: 2.0
+  rolling_walk_forward: true
+  regime_method: realized_range_quantile
+
+promotion_gate:
+  minimum_symbols: 3
+  require_multiple_oos_windows: true
+  required_metrics:
+    - net_pnl
+    - maximum_drawdown
+    - profit_factor
+    - fees_paid
+    - total_trades
+  automatic_promotion: false

@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from data.models import AccountSnapshot, Balance
+from data.models import Balance
 from decision.decision_engine import DecisionEngine
 from execution.base_backend import BackendStatus
 from execution.errors import SubmissionUncertainError
@@ -25,7 +25,15 @@ class LifecycleBackend:
         self.cancel_response = {"data": {"data": [{"sCode": "0"}]}}
 
     def status(self): return BackendStatus("fake", "CONNECTED", True, True)
-    def capabilities(self): return {"attached_tp_sl": True, "client_order_id": True}
+    def capabilities(self):
+        return {
+            "attached_tp_sl": True,
+            "client_order_id": True,
+            "fill_order_lookup": True,
+            "fills_pagination": True,
+            "fills_time_window": True,
+            "fills_archive": True,
+        }
     def place_order(self, order):
         self.place_calls += 1
         client_id = order["clOrdId"]
@@ -41,7 +49,11 @@ class LifecycleBackend:
         return {"data": {"data": [self.remote]}}
     def get_order(self, symbol, order_id): return {"data": {"data": [self.remote]}} if self.remote else {"data": {"data": []}}
     def get_protection_orders(self, symbol=None): return {"data": {"data": self.protection}}
-    def get_fills(self, symbol=None): return {"data": {"data": self.fills}}
+    def get_fills(self, symbol=None, *, order_id=None, **_kwargs):
+        rows = self.fills if order_id is None else [
+            row for row in self.fills if str(row.get("ordId", "")) == str(order_id)
+        ]
+        return {"data": {"data": rows}}
     def cancel_order(self, symbol, order_id): return self.cancel_response
 
 
@@ -84,7 +96,8 @@ def test_two_agent_managed_positions_reach_limit(tmp_path, long_signal) -> None:
     store = TradeStore(tmp_path / "positions.db")
     first = plan_for(long_signal)
     second = replace(first, plan_id="second-plan", symbol="ETH-USDT")
-    store.save_plan(first); store.save_plan(second)
+    store.save_plan(first)
+    store.save_plan(second)
     store.upsert_managed_position(first.plan_id, "1", first.symbol, .01, 100, "FILLED", "PROTECTED")
     store.upsert_managed_position(second.plan_id, "2", second.symbol, 1, 10, "PARTIALLY_FILLED", "PROTECTED")
     assert store.daily_state().open_position_count == 2

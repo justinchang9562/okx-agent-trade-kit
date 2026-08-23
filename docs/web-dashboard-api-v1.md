@@ -23,10 +23,12 @@ execution instructions.
 5. All read endpoints except API documentation require the session cookie.
    Every action endpoint additionally requires `X-CSRF-Token`.
 6. ARM, Agent start, AUTO enable, approval preview and approval submission also
-   require a currently authenticated WebSocket heartbeat. A stale or disconnected
+   require a currently authenticated WebSocket client acknowledgement. A stale or disconnected
    stream fails `WEBSOCKET_NOT_FRESH` before the action handler runs.
-7. WebSocket is server-to-client/read-only. It accepts no action messages and
-   checks both the session cookie and a localhost Origin.
+7. WebSocket is read-only except for strict
+   `{ "type": "heartbeat.ack", "sequence": <last_seen> }` acknowledgements. Any
+   other client message is rejected and can never trigger a control action. The
+   handshake checks both the session cookie and a localhost Origin.
 8. Browser projections recursively redact sensitive key names and authorization
    values. Backend/adapter/executor objects are never serialized.
 9. Service errors use `{ "error": { "code": "...", "message": "..." } }`.
@@ -46,9 +48,9 @@ The following domains are orthogonal and are returned in `status.control`:
 | `connection_state` | `CONNECTED`, `STALE`, `DISCONNECTED` | Derived from backend health; not execution authority. |
 | `kill_switch_active` | boolean | `true` blocks new entries/AUTO, DISARMS and stops runtime. |
 
-Every transition is persisted to `control_audit_log`. The stored row is never
-trusted to restore risk after restart: startup overwrites it with
-`DEMO / DISARMED / STOPPED / AUTO disabled` before recovery.
+Every transition is persisted to `control_audit_log`. Startup forces
+`DEMO / DISARMED / STOPPED / AUTO disabled` before recovery, preserves only a
+valid scan interval, and preserves an ACTIVE Kill Switch until explicit reset.
 
 ## Read endpoints
 
@@ -85,15 +87,21 @@ trusted to restore risk after restart: startup overwrites it with
 | `POST /auto-demo/disable` | none | Disables AUTO and disarms if AUTO was selected. |
 | `POST /kill-switch` | none | Stops/disarms/disables AUTO; preserves TP/SL. |
 | `POST /kill-switch/reset` | `{confirmation}` | Exact `RESET KILL SWITCH`; safe STOPPED/DISARMED. |
-| `POST /plans/{plan_id}/preview` | none | Fresh TTL/data/spread/risk/exposure/size/deviation preview. |
-| `POST /plans/{plan_id}/approve` | `{confirmation}` | Exact `CONFIRM DEMO ORDER`; server plan ID only. |
+| `POST /plans/{plan_id}/preview` | none | Fresh TTL/data/spread/risk/exposure/size/deviation preview plus one-time challenge. |
+| `POST /plans/{plan_id}/approve` | `{approval_challenge}` | One-time, session/plan/preview-bound Demo approval; no order fields. |
 | `POST /plans/{plan_id}/reject` | none | Rejects a still-pending plan. |
 | `POST /backtest` | `{symbol,days,walk_forward}` | 7/30/90-day backtest or walk-forward. |
 | `PUT /settings/runtime` | `{scan_interval_seconds}` | Allowlisted 5–3600 seconds only. |
 
 Approval does not accept `symbol`, `side`, `amount`, entry, TP, SL or order type.
-Core reloads the persisted plan and performs fresh revalidation. Duplicate plan
-approval remains blocked by the Core SQLite idempotency boundary.
+The 15-second challenge is consumed once and is not an order-parameter token.
+Core reloads the persisted plan and performs fresh revalidation; material price,
+size or risk drift requires a new preview. Duplicate plan approval remains
+blocked by challenge consumption, plan-state CAS and client-order-ID idempotency.
+
+Backtests use a separate one-thread service and public read-only MCP process.
+They return `BACKTEST_BLOCKED_WHILE_EXECUTION_ARMED` while ARMED and fail closed
+when an active runtime cannot safely share upstream read capacity.
 
 ## WebSocket v1
 
@@ -113,7 +121,10 @@ Endpoint: `ws://127.0.0.1:8000/api/v1/ws`
 `sequence` is process-local and monotonic. Reconnect begins with a full
 `snapshot`; clients replace their projection and then apply newer events.
 Heartbeats are sent each second. The browser marks the stream stale after seven
-seconds and the server independently requires a heartbeat not older than eight.
+seconds and acknowledges each received event with its last sequence. The server
+independently requires a client ACK not older than eight seconds; successful
+server sends do not refresh eligibility. Any fresh authenticated tab is enough,
+while all stale tabs fail closed.
 The same server-side freshness gate is used by AUTO DEMO and the DemoExecutor's
 last-moment entry guard, so closing every authenticated control stream stops all
 new automatic submissions without touching existing protection.

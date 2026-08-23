@@ -16,13 +16,13 @@ from execution.order_state import OrderState
 from monitoring.health import run_health
 from monitoring.logger import configure_logging, log_event
 from risk.daily_limits import daily_loss_reached
+from risk.execution_revalidation import build_executable_long_plan
 from risk.exposure import ExposureSnapshot, build_exposure_snapshot
-from risk.position_sizing import SizingResult, calculate_position_size
-from risk.price_quantization import quantize_long_execution_prices, risk_reward
+from risk.position_sizing import SizingResult, calculate_position_size, cap_position_size
 from risk.risk_manager import RiskDecision, RiskManager
 from storage.signal_store import SignalStore
 from storage.trade_store import TradeStore
-from strategies.scalping_strategy import ScalpingStrategy
+from strategies.registry import PRODUCTION_STRATEGY_VERSION, build_strategy
 from trading_agent.config import AppConfig
 from trading_agent.state import AgentState, RuntimeMode
 
@@ -41,13 +41,43 @@ def _ticker_price(payload: dict[str, Any]) -> float | None:
     return None
 
 
+def _change_pct(current: Any, expected: Any) -> float:
+    try:
+        current_value = float(current)
+        expected_value = float(expected)
+    except (TypeError, ValueError):
+        return float("inf")
+    if expected_value == 0:
+        return 0.0 if current_value == 0 else float("inf")
+    return abs(current_value - expected_value) / abs(expected_value) * 100
+
+
+def approval_preview_change(
+    current: dict[str, Any], expected: dict[str, Any], rules: dict[str, Any],
+) -> dict[str, float]:
+    approval = rules.get("approval", {})
+    limits = {
+        "current_executable_price": float(approval.get("max_preview_price_change_pct", 0.15)),
+        "final_stop": float(approval.get("max_preview_price_change_pct", 0.15)),
+        "final_take_profit": float(approval.get("max_preview_price_change_pct", 0.15)),
+        "position_size": float(approval.get("max_preview_size_change_pct", 1.0)),
+        "final_risk_amount": float(approval.get("max_preview_risk_change_pct", 1.0)),
+    }
+    return {
+        field: _change_pct(current.get(field), expected.get(field))
+        for field, limit in limits.items()
+        if _change_pct(current.get(field), expected.get(field)) > limit
+    }
+
+
 class TradingOrchestrator:
     def __init__(self, config: AppConfig, adapter: OKXAdapter | None = None) -> None:
         self.config = config
         self.adapter = adapter or OKXAdapter(config.backend)
         self.market_data = MarketDataService(self.adapter.backend, config.rules)
         self.account_data = AccountDataService(self.adapter.backend)
-        self.strategy = ScalpingStrategy(config.rules)
+        strategy_version = str(config.rules.get("strategy_version", PRODUCTION_STRATEGY_VERSION))
+        self.strategy = build_strategy(strategy_version, config.rules, production=True)
         self.risk = RiskManager(config.rules)
         self.decision = DecisionEngine()
         database = config.root / "trading_agent.db"
@@ -145,7 +175,14 @@ class TradingOrchestrator:
         log_event(self.logger, "trade_plan", payload)
         return plan
 
-    def approve_plan(self, plan_id: str, approval_text: str = "") -> dict[str, Any]:
+    def approve_plan(
+        self,
+        plan_id: str,
+        approval_text: str = "",
+        *,
+        position_size_cap: float | None = None,
+        expected_preview: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not self.state.allows_new_entries:
             return {"status": "REJECTED", "reason": "TRADING_STOPPED", "plan_id": plan_id}
         plan = self.trade_store.get_plan(plan_id)
@@ -163,51 +200,69 @@ class TradingOrchestrator:
         if fresh_signal.side != "LONG":
             self.trade_store.reject_plan(plan_id, "SIGNAL_NO_LONGER_VALID")
             return {"status": "REJECTED", "reason": "SIGNAL_NO_LONGER_VALID", "plan_id": plan_id}
-        if fresh_signal.suggested_stop is None or fresh_signal.suggested_take_profit is None:
-            reason = "MISSING_STOP_LOSS" if fresh_signal.suggested_stop is None else "MISSING_TAKE_PROFIT"
-            self.trade_store.reject_plan(plan_id, reason)
-            return {"status": "REJECTED", "reason": reason, "plan_id": plan_id}
-        try:
-            executable_price, final_stop, final_take_profit = quantize_long_execution_prices(
-                market.ask, fresh_signal.suggested_stop, fresh_signal.suggested_take_profit,
-                market.instrument.tick_size,
-            )
-        except ValueError as exc:
-            reason = str(exc)
-            self.trade_store.reject_plan(plan_id, reason)
-            return {"status": "REJECTED", "reason": reason, "plan_id": plan_id}
-        final_rr = risk_reward(executable_price, final_stop, final_take_profit)
-        final_signal = replace(
-            fresh_signal, entry_price=executable_price, suggested_stop=final_stop,
-            suggested_take_profit=final_take_profit, risk_reward=final_rr,
+        state = self.trade_store.daily_state()
+        duplicate = self.trade_store.is_duplicate(plan_id)
+        preliminary = build_executable_long_plan(
+            fresh_signal,
+            market,
+            account,
+            state,
+            self.config.rules,
+            duplicate=duplicate,
+            risk_manager=self.risk,
         )
+        executable_price = preliminary.entry
+        final_stop = preliminary.stop
+        final_take_profit = preliminary.take_profit
+        final_rr = preliminary.risk_reward
+        final_signal = preliminary.signal
         deviation_pct = abs(executable_price - plan.entry) / plan.entry * 100 if plan.entry > 0 else float("inf")
         max_deviation = float(self.config.rules["execution"]["max_entry_deviation_pct"])
         if deviation_pct > max_deviation:
             self.trade_store.reject_plan(plan_id, "PRICE_MOVED_TOO_FAR")
             return {"status": "REJECTED", "reason": "PRICE_MOVED_TOO_FAR", "plan_id": plan_id,
                     "entry_deviation_pct": deviation_pct, "limit_pct": max_deviation}
-        state = self.trade_store.daily_state()
-        duplicate = self.trade_store.is_duplicate(plan_id)
-        risk_decision = self.risk.evaluate(
-            final_signal, market, account, state, duplicate=duplicate,
+        if not preliminary.approved:
+            self.trade_store.reject_plan(plan_id, preliminary.reason)
+            return {"status": "REJECTED", "reason": preliminary.reason, "plan_id": plan_id}
+        exposure = self._exposure(account, market, preliminary.sizing.notional_usdt)
+        final = build_executable_long_plan(
+            fresh_signal,
+            market,
+            account,
+            state,
+            self.config.rules,
+            duplicate=duplicate,
+            exposure=exposure,
+            risk_manager=self.risk,
         )
-        sizing = SizingResult(False, risk_decision.reason)
-        if risk_decision.approved:
-            sizing = calculate_position_size(
-                account, market.instrument, executable_price, final_stop,
-                float(self.config.rules["risk"]["risk_per_trade"]),
-                float(self.config.rules["risk"]["max_position_pct"]),
+        if not final.approved:
+            self.trade_store.reject_plan(plan_id, final.reason)
+            return {"status": "REJECTED", "reason": final.reason, "plan_id": plan_id}
+        sizing = final.sizing
+        if position_size_cap is not None:
+            sizing = cap_position_size(
+                sizing,
+                market.instrument,
+                executable_price,
+                final_stop,
+                position_size_cap,
             )
-        exposure = self._exposure(account, market, sizing.notional_usdt if sizing.approved else 0.0)
-        if risk_decision.approved and sizing.approved:
-            risk_decision = self.risk.evaluate(
-                final_signal, market, account, state, duplicate=duplicate, exposure=exposure,
+            if not sizing.approved:
+                self.trade_store.reject_plan(plan_id, sizing.reason)
+                return {"status": "REJECTED", "reason": sizing.reason, "plan_id": plan_id}
+            exposure = self._exposure(account, market, sizing.notional_usdt)
+            capped_risk = self.risk.evaluate(
+                final_signal,
+                market,
+                account,
+                state,
+                duplicate=duplicate,
+                exposure=exposure,
             )
-        if not risk_decision.approved or not sizing.approved:
-            reason = risk_decision.reason if not risk_decision.approved else sizing.reason
-            self.trade_store.reject_plan(plan_id, reason)
-            return {"status": "REJECTED", "reason": reason, "plan_id": plan_id}
+            if not capped_risk.approved:
+                self.trade_store.reject_plan(plan_id, capped_risk.reason)
+                return {"status": "REJECTED", "reason": capped_risk.reason, "plan_id": plan_id}
         pre_submit_slippage_pct = abs(executable_price - market.price) / market.price * 100
         max_slippage = float(self.config.rules["execution"]["max_slippage_pct"])
         if pre_submit_slippage_pct > max_slippage:
@@ -226,7 +281,8 @@ class TradingOrchestrator:
         preview = {
             "status": "READY_FOR_EXACT_APPROVAL", "plan_id": plan_id, "symbol": plan.symbol,
             "planned_entry": plan.entry, "current_executable_price": executable_price,
-            "entry_deviation_pct": deviation_pct, "position_size": sizing.quantity,
+            "entry_deviation_pct": deviation_pct, "spread_pct": market.spread_pct,
+            "previewed_at_ms": _now_ms(), "position_size": sizing.quantity,
             "final_stop": final_stop, "final_take_profit": final_take_profit,
             "final_risk_reward": final_rr, "final_risk_amount": sizing.risk_amount,
             "estimated_usdt": sizing.notional_usdt, "wallet_exposure": asdict(exposure),
@@ -235,6 +291,15 @@ class TradingOrchestrator:
             "reserved_entry_notional": self.trade_store.reserved_entry_notional(),
             "expires_at_ms": plan.expires_at_ms,
         }
+        if expected_preview is not None:
+            changes = approval_preview_change(preview, expected_preview, self.config.rules)
+            if changes:
+                return {
+                    "status": "REPREVIEW_REQUIRED",
+                    "reason": "APPROVAL_PREVIEW_CHANGED",
+                    "plan_id": plan_id,
+                    "change_pct": changes,
+                }
         if approval_text.strip() not in EXPLICIT_APPROVALS:
             return preview | {"execution": "BLOCKED_EXPLICIT_APPROVAL_REQUIRED"}
         if not self.trade_store.update_pending_plan_snapshot(final_plan):
@@ -312,6 +377,7 @@ class TradingOrchestrator:
         }
 
     def get_status(self) -> dict[str, Any]:
+        daily = self.trade_store.daily_state()
         return {
             "environment": self.config.environment, "backend": self.config.backend,
             "backend_status": asdict(self.adapter.backend.status()),
@@ -321,6 +387,8 @@ class TradingOrchestrator:
             "position_slots_in_use": self.trade_store.position_slots_in_use(),
             "reserved_entry_notional": self.trade_store.reserved_entry_notional(),
             "pending_plans": len(self.trade_store.list_pending_plans()),
+            "daily_pnl": daily.realized_pnl,
+            "consecutive_losses": daily.consecutive_losses,
             "live": "LOCKED",
         }
 

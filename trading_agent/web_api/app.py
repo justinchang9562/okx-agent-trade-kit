@@ -236,11 +236,32 @@ def create_app(service: TradingService | None = None) -> FastAPI:
 
     @app.post(f"{API_PREFIX}/plans/{{plan_id}}/preview", dependencies=high_risk_auth, tags=["approval"])
     async def approval_preview(plan_id: str, request: Request) -> dict[str, Any]:
-        return await asyncio.to_thread(current_service(request).approval_preview, plan_id)
+        preview = await asyncio.to_thread(current_service(request).approval_preview, plan_id)
+        if preview.get("status") != "READY_FOR_EXACT_APPROVAL":
+            raise ServiceError(str(preview.get("reason") or "PLAN_NOT_EXECUTABLE"), 409)
+        cookie = request.cookies.get(SESSION_COOKIE) or ""
+        challenge = request.app.state.sessions.create_approval_challenge(
+            cookie,
+            plan_id,
+            preview,
+            float(current_service(request).config.rules["approval"].get("challenge_ttl_seconds", 15)),
+        )
+        return preview | challenge
 
     @app.post(f"{API_PREFIX}/plans/{{plan_id}}/approve", dependencies=high_risk_auth, tags=["approval"])
     async def approve(plan_id: str, body: ApprovalRequest, request: Request) -> dict[str, Any]:
-        return await asyncio.to_thread(current_service(request).approve_plan, plan_id, body.confirmation)
+        cookie = request.cookies.get(SESSION_COOKIE) or ""
+        try:
+            preview = request.app.state.sessions.consume_approval_challenge(
+                cookie, plan_id, body.approval_challenge,
+            )
+        except ValueError as exc:
+            raise ServiceError(str(exc), 409) from exc
+        return await asyncio.to_thread(
+            current_service(request).approve_plan_with_challenge,
+            plan_id,
+            preview,
+        )
 
     @app.post(f"{API_PREFIX}/plans/{{plan_id}}/reject", dependencies=write_auth, tags=["approval"])
     async def reject(plan_id: str, request: Request) -> dict[str, Any]:
@@ -279,11 +300,28 @@ def create_app(service: TradingService | None = None) -> FastAPI:
                     "reason": "DATA_UNAVAILABLE", "data": {"error_type": type(exc).__name__},
                 })
             while True:
-                await asyncio.sleep(1)
-                if not websocket.app.state.sessions.mark_websocket(socket_session, connection_id):
+                try:
+                    message = await asyncio.wait_for(websocket.receive_json(), timeout=1.0)
+                except TimeoutError:
+                    message = None
+                if not websocket.app.state.sessions.websocket_registered(socket_session, connection_id):
                     await websocket.close(code=4401, reason="SESSION_EXPIRED")
                     return
-                service.client_stream_heartbeat(connection_id)
+                if message is not None:
+                    valid_ack = (
+                        isinstance(message, dict)
+                        and set(message) == {"type", "sequence"}
+                        and message.get("type") == "heartbeat.ack"
+                        and isinstance(message.get("sequence"), int)
+                        and not isinstance(message.get("sequence"), bool)
+                        and 0 <= int(message["sequence"]) <= sequence
+                    )
+                    if not valid_ack or not websocket.app.state.sessions.acknowledge_websocket(
+                        socket_session, connection_id, int(message.get("sequence", -1)),
+                    ):
+                        await websocket.close(code=4400, reason="INVALID_HEARTBEAT_ACK")
+                        return
+                    service.client_stream_acknowledged(connection_id)
                 events = service.events_after(sequence)
                 if events:
                     for event in events:

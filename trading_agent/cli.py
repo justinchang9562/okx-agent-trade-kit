@@ -4,8 +4,10 @@ import argparse
 import json
 from typing import Any
 
-from backtest.backtester import Backtester
+from storage.control_store import ControlStore
+from trading_agent.backtest_service import BacktestService
 from trading_agent.config import load_config
+from trading_agent.control_state import AgentRuntimeState, ExecutionState
 from trading_agent.orchestrator import TradingOrchestrator
 
 
@@ -34,6 +36,25 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config()
+    if args.command in {"backtest", "walk-forward"}:
+        control = ControlStore(config.root / "trading_agent.db")
+        backtests = BacktestService(config)
+        try:
+            snapshot = control.get()
+            if snapshot.execution_state is ExecutionState.ARMED:
+                _print({"status": "REJECTED", "reason": "BACKTEST_BLOCKED_WHILE_EXECUTION_ARMED"})
+                return 2
+            if (
+                snapshot.agent_runtime_state is AgentRuntimeState.RUNNING
+                and not backtests.concurrent_with_runtime_supported()
+            ):
+                _print({"status": "REJECTED", "reason": "BACKTEST_BACKEND_CONCURRENCY_UNAVAILABLE"})
+                return 2
+            _print(backtests.run(args.symbol.upper(), args.days, args.command == "walk-forward"))
+            return 0
+        finally:
+            backtests.close()
+            control.close()
     with TradingOrchestrator(config) as orchestrator:
         if args.command == "status":
             _print(orchestrator.get_status())
@@ -69,12 +90,4 @@ def main(argv: list[str] | None = None) -> int:
             _print(orchestrator.reject_plan(args.plan_id))
         elif args.command == "recover":
             _print(orchestrator.recover())
-        elif args.command == "backtest":
-            _print(Backtester(orchestrator.adapter.backend, config.rules, config.root / "data_cache").run(
-                args.symbol.upper(), days=args.days
-            ))
-        elif args.command == "walk-forward":
-            _print(Backtester(orchestrator.adapter.backend, config.rules, config.root / "data_cache").walk_forward(
-                args.symbol.upper(), days=args.days
-            ))
     return 0

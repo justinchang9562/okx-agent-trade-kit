@@ -4,7 +4,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 5
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -72,9 +72,30 @@ CREATE TABLE IF NOT EXISTS managed_positions (
   entry_price REAL, state TEXT NOT NULL, protection_state TEXT NOT NULL,
   opened_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, closed_at_ms INTEGER,
   exit_order_id TEXT, protective_order_ids_json TEXT,
+  exit_filled_quantity REAL NOT NULL DEFAULT 0, exit_fee_breakdown_json TEXT,
   FOREIGN KEY(plan_id) REFERENCES trade_plans(plan_id)
 );
 CREATE INDEX IF NOT EXISTS idx_managed_positions_state ON managed_positions(state);
+CREATE TABLE IF NOT EXISTS reconciliation_cursors (
+  symbol TEXT NOT NULL, stream_kind TEXT NOT NULL,
+  last_timestamp_ms INTEGER, last_fill_id TEXT, updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(symbol, stream_kind)
+);
+CREATE TABLE IF NOT EXISTS reconciliation_audit (
+  id INTEGER PRIMARY KEY, timestamp_ms INTEGER NOT NULL, plan_id TEXT,
+  symbol TEXT NOT NULL, result_code TEXT NOT NULL, details_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reconciliation_audit_timestamp
+  ON reconciliation_audit(timestamp_ms);
+CREATE TABLE IF NOT EXISTS reconciled_exit_fills (
+  plan_id TEXT NOT NULL, fill_key TEXT NOT NULL, order_id TEXT,
+  fill_timestamp_ms INTEGER NOT NULL, quantity REAL NOT NULL, price REAL NOT NULL,
+  fee REAL, fee_currency TEXT,
+  PRIMARY KEY(plan_id, fill_key),
+  FOREIGN KEY(plan_id) REFERENCES trade_plans(plan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_reconciled_exit_fills_plan_time
+  ON reconciled_exit_fills(plan_id, fill_timestamp_ms);
 CREATE TABLE IF NOT EXISTS trades (
   id INTEGER PRIMARY KEY, timestamp_ms INTEGER NOT NULL, environment TEXT NOT NULL,
   backend TEXT NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL, entry REAL NOT NULL,
@@ -106,7 +127,10 @@ def _migrate(connection: sqlite3.Connection) -> None:
         "exit_order_id TEXT",
     ):
         _ensure_column(connection, "trades", definition)
-    for definition in ("exit_order_id TEXT", "protective_order_ids_json TEXT"):
+    for definition in (
+        "exit_order_id TEXT", "protective_order_ids_json TEXT",
+        "exit_filled_quantity REAL NOT NULL DEFAULT 0", "exit_fee_breakdown_json TEXT",
+    ):
         _ensure_column(connection, "managed_positions", definition)
     connection.execute("UPDATE signals SET signal_strength = confidence WHERE signal_strength IS NULL")
     connection.execute(

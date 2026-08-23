@@ -22,7 +22,7 @@ class ConfirmationRequest(StrictModel):
 
 
 class ApprovalRequest(StrictModel):
-    confirmation: str = Field(min_length=1, max_length=80)
+    approval_challenge: str = Field(min_length=32, max_length=256)
 
 
 class BacktestRequest(StrictModel):
