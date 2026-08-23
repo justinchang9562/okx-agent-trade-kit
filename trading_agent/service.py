@@ -9,8 +9,12 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from typing import Any, TypeVar
 
+from data.realtime.instrument_cache import InstrumentCache
+from data.realtime.models import ConfirmedCandleEvent
+from data.realtime.runtime import RealtimeMarketRuntime
 from storage.control_store import ControlStore
 from storage.trade_store import now_ms
+from trading_agent.account_synchronizer import AccountSynchronizer
 from trading_agent.backtest_service import BacktestService
 from trading_agent.config import AppConfig
 from trading_agent.control_api import LocalControlAPI
@@ -19,9 +23,11 @@ from trading_agent.control_state import (
     ConnectionState,
     EnvironmentState,
     ExecutionState,
+    SessionState,
     TradingMode,
 )
 from trading_agent.orchestrator import TradingOrchestrator
+from trading_agent.session_controller import AutoTradingSessionController, SessionPreflightError
 from trading_agent.state import RuntimeMode
 
 T = TypeVar("T")
@@ -82,12 +88,16 @@ class TradingService:
         *,
         start_scheduler: bool = True,
         backtest_service: BacktestService | None = None,
+        start_realtime: bool | None = None,
+        realtime_runtime: RealtimeMarketRuntime | None = None,
     ) -> None:
         self.config = config
         self._orchestrator = orchestrator or TradingOrchestrator(config)
         self._api = LocalControlAPI(self._orchestrator)
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="trading-core")
+        self._event_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="market-events")
         self._backtests = backtest_service or BacktestService(config)
+        self._account_sync = AccountSynchronizer()
         self._control = ControlStore(config.root / "trading_agent.db")
         self._events: deque[dict[str, Any]] = deque(maxlen=500)
         self._event_lock = threading.RLock()
@@ -103,10 +113,29 @@ class TradingService:
         self._last_status: dict[str, Any] = {}
         self._last_orders: dict[str, Any] = {}
         self._last_positions: dict[str, Any] = {}
+        self._last_fills: list[dict[str, Any]] = []
+        self._last_market: dict[str, Any] = {}
         self._last_scan_at_ms: int | None = None
         self._last_health_at_ms: int | None = None
+        self._last_account_at_ms: int | None = None
+        self._realtime: RealtimeMarketRuntime | None = realtime_runtime
         self._orchestrator.order_manager.executor.entry_guard = self._final_entry_guard
+        self._session = AutoTradingSessionController(self)
         self._run_core(self._safe_startup)
+        realtime_enabled = bool(config.rules.get("realtime", {}).get("enabled", True))
+        should_start_realtime = start_scheduler if start_realtime is None else start_realtime
+        if self._realtime is None and should_start_realtime and realtime_enabled:
+            self._realtime = RealtimeMarketRuntime(
+                self._orchestrator.adapter.backend,
+                config.symbols,
+                config.rules,
+                InstrumentCache(self._orchestrator.adapter.backend),
+                self._on_confirmed_candle,
+            )
+        if self._realtime is not None:
+            self._run_core(self._orchestrator.set_market_provider, self._realtime.provider)
+            if should_start_realtime:
+                self._realtime.start()
         if start_scheduler:
             self._scheduler = threading.Thread(
                 target=self._scheduler_loop, name="trading-runtime", daemon=True,
@@ -211,8 +240,11 @@ class TradingService:
             raise PermissionError("AGENT_NOT_RUNNING")
         if control.execution_state is not ExecutionState.ARMED:
             raise PermissionError("EXECUTION_DISARMED")
-        if not self.client_stream_fresh():
-            raise PermissionError("CONTROL_STREAM_NOT_FRESH")
+        if control.session_state is not SessionState.RUNNING:
+            raise PermissionError("AUTO_SESSION_NOT_RUNNING")
+        if self._realtime is None:
+            raise PermissionError("REALTIME_MARKET_NOT_CONFIGURED")
+        self._realtime.state.assert_entry_ready()
         self._orchestrator.state.require_new_entry_allowed()
 
     def _transition(self, action: str, reason: str = "PASS", **changes: Any) -> dict[str, Any]:
@@ -240,6 +272,141 @@ class TradingService:
         self._orchestrator.state.disarm_execution()
         self._orchestrator.state.auto_demo_enabled = False
         self._orchestrator.state.runtime_mode = RuntimeMode.STOPPED
+
+    def _session_preflight(self) -> list[str]:
+        blockers: list[str] = []
+        control = self._control.get()
+        if control.environment is not EnvironmentState.DEMO or self.config.environment != "demo":
+            blockers.append("DEMO_ENVIRONMENT_REQUIRED")
+        live = self.config.environments.get("environments", {}).get("live", {})
+        if bool(live.get("enabled", False)):
+            blockers.append("LIVE_MUST_REMAIN_LOCKED")
+        if control.kill_switch_active:
+            blockers.append("KILL_SWITCH_ACTIVE")
+        if not self.client_stream_fresh():
+            blockers.append("CONTROL_STREAM_NOT_FRESH")
+        try:
+            backend_status = self._run_core(self._orchestrator.adapter.backend.status)
+            if not backend_status.available or not backend_status.demo:
+                blockers.append("OKX_DEMO_BACKEND_UNAVAILABLE")
+            capabilities = self._run_core(self._orchestrator.adapter.backend.capabilities)
+            if not capabilities.get("attached_tp_sl", False):
+                blockers.append("TP_SL_BACKEND_NOT_SUPPORTED")
+        except Exception:
+            blockers.append("OKX_DEMO_BACKEND_UNAVAILABLE")
+        if self._realtime is None:
+            blockers.append("REALTIME_MARKET_NOT_CONFIGURED")
+        else:
+            try:
+                self._realtime.state.assert_entry_ready()
+                self._last_market = sanitize_for_browser(self._realtime.status())
+            except Exception as exc:
+                blockers.append(str(exc) if str(exc).startswith("MARKET_") else "REALTIME_MARKET_NOT_READY")
+        try:
+            recovery = self._run_core(self._orchestrator.recover)
+            self._emit("orders.reconciled", {"results": recovery})
+        except Exception:
+            blockers.append("RECONCILIATION_UNAVAILABLE")
+        try:
+            self._synchronize_account()
+        except Exception:
+            blockers.append("ACCOUNT_DATA_UNAVAILABLE")
+        stale_after = float(self.config.rules.get("runtime", {}).get("account_stale_after_seconds", 10))
+        if self._last_account_at_ms is None or now_ms() - self._last_account_at_ms > stale_after * 1000:
+            blockers.append("ACCOUNT_STATE_STALE")
+        try:
+            health = self.refresh_health()
+            health_blockers = set(health.get("trading_eligibility", {}).get("blocking_reasons", []))
+            health_blockers.difference_update({"EXECUTION_DISARMED", "TRADING_STOPPED"})
+            blockers.extend(sorted(health_blockers))
+            if health.get("system_capability", {}).get("status") != "READY":
+                blockers.append("SYSTEM_CAPABILITY_NOT_READY")
+        except Exception:
+            blockers.append("RISK_SYSTEM_UNAVAILABLE")
+        try:
+            orders = self._run_core(self._orchestrator.trade_store.get_orders)
+            if any(item.get("state") == "SUBMISSION_UNKNOWN" for item in orders):
+                blockers.append("SUBMISSION_UNKNOWN_REQUIRES_RECONCILIATION")
+            positions = self._run_core(self._orchestrator.trade_store.managed_positions)
+            if any(item.protection_state != "PROTECTED" for item in positions):
+                blockers.append("POSITION_UNPROTECTED")
+        except Exception:
+            blockers.append("RECONCILIATION_STATE_UNAVAILABLE")
+        if self._orchestrator.risk is None:
+            blockers.append("RISK_SYSTEM_UNAVAILABLE")
+        if self._orchestrator.strategy is None:
+            blockers.append("STRATEGY_NOT_READY")
+        return list(dict.fromkeys(blockers))
+
+    @serialized_action
+    def start_session(self) -> dict[str, Any]:
+        try:
+            result = self._session.start()
+        except SessionPreflightError as exc:
+            self._emit("session.start_rejected", {"blockers": exc.blockers}, exc.blockers[0])
+            raise ServiceError(exc.blockers[0], 423, ", ".join(exc.blockers)) from exc
+        self._emit("session.started", result, "PASS")
+        return sanitize_for_browser(result)
+
+    @serialized_action
+    def pause_session(self) -> dict[str, Any]:
+        result = self._session.pause()
+        self._emit("session.paused", result, "NEW_ENTRIES_BLOCKED_PROTECTION_PRESERVED")
+        return sanitize_for_browser(result)
+
+    @serialized_action
+    def stop_session(self) -> dict[str, Any]:
+        result = self._session.stop()
+        self._emit("session.stopped", result, "SESSION_STOPPED_PROTECTION_PRESERVED")
+        return sanitize_for_browser(result)
+
+    @serialized_action
+    def flatten_session(self) -> dict[str, Any]:
+        result = self._session.flatten()
+        self._emit("session.flatten", result, str(result["status"]))
+        return sanitize_for_browser(result)
+
+    def session_status(self) -> dict[str, Any]:
+        status = self._session.status()
+        status["market"] = self._last_market
+        status["account_freshness_age_seconds"] = (
+            (now_ms() - self._last_account_at_ms) / 1000 if self._last_account_at_ms else None
+        )
+        return sanitize_for_browser(status)
+
+    def _on_confirmed_candle(self, event: ConfirmedCandleEvent) -> None:
+        if self._closed:
+            return
+        try:
+            self._event_worker.submit(self._handle_confirmed_candle, event)
+        except RuntimeError:
+            return
+
+    def _handle_confirmed_candle(self, event: ConfirmedCandleEvent) -> None:
+        control = self._control.get()
+        if event.timeframe != "1m" or control.session_state is not SessionState.RUNNING:
+            return
+        started = now_ms()
+        created = False
+        try:
+            if self._realtime is None:
+                raise PermissionError("REALTIME_MARKET_NOT_CONFIGURED")
+            self._realtime.state.assert_entry_ready(event.symbol)
+            plan = self._run_core(self._orchestrator.analyze, event.symbol)
+            payload = sanitize_for_browser(plan.as_dict())
+            self._last_scan[event.symbol] = payload
+            self._last_scan_at_ms = now_ms()
+            self._emit("scanner.updated", {event.symbol: payload})
+            created = bool(plan.plan_id)
+            if plan.decision == "BUY" and plan.risk_approved:
+                outcome = self._run_core(self._orchestrator.execute_plan_automatically, plan.plan_id)
+                self._emit("auto_session.execution_result", outcome, str(outcome.get("reason", "PASS")))
+        except Exception as exc:
+            self._session.degrade(type(exc).__name__)
+            self._emit("runtime.error", {"error_type": type(exc).__name__}, "FAIL_CLOSED")
+        finally:
+            if self._realtime is not None:
+                self._realtime.state.metrics.record_strategy(started, now_ms(), created)
 
     @serialized_action
     def set_environment(self, environment: str) -> dict[str, Any]:
@@ -284,6 +451,9 @@ class TradingService:
         return self._transition(
             "STOP_AGENT", agent_runtime_state=AgentRuntimeState.STOPPED,
             execution_state=ExecutionState.DISARMED,
+            session_state=SessionState.STOPPED,
+            trading_mode=TradingMode.STOPPED,
+            auto_demo_enabled=False,
         )
 
     def refresh_health(self) -> dict[str, Any]:
@@ -364,6 +534,7 @@ class TradingService:
             execution_state=ExecutionState.DISARMED,
             agent_runtime_state=AgentRuntimeState.STOPPED,
             trading_mode=TradingMode.STOPPED,
+            session_state=SessionState.STOPPED,
         )
         self._run_core(self._orchestrator.state.activate_kill_switch)
         result = snapshot.as_dict()
@@ -380,6 +551,7 @@ class TradingService:
             execution_state=ExecutionState.DISARMED,
             agent_runtime_state=AgentRuntimeState.STOPPED,
             trading_mode=TradingMode.STOPPED,
+            session_state=SessionState.STOPPED,
         )
 
     def status(self) -> dict[str, Any]:
@@ -393,12 +565,19 @@ class TradingService:
         self._last_status = sanitize_for_browser({
             "schema_version": "1.0",
             "control": self.control(),
+            "session": self.session_status(),
+            "market": self._last_market,
             "core": core,
             "live": {"setup_state": "NOT_CONFIGURED", "execution": "LOCKED"},
             "observability": {
                 "connection_freshness_age_seconds": self.client_stream_freshness_age_seconds(),
                 "last_scan_at_ms": self._last_scan_at_ms,
                 "last_health_at_ms": self._last_health_at_ms,
+                "last_account_at_ms": self._last_account_at_ms,
+                "account_freshness_age_seconds": (
+                    (now_ms() - self._last_account_at_ms) / 1000
+                    if self._last_account_at_ms else None
+                ),
                 "pending_plan_nearest_expiry_ms": min(pending_expiries) if pending_expiries else None,
                 "daily_pnl": core.get("daily_pnl"),
                 "consecutive_losses": core.get("consecutive_losses"),
@@ -418,9 +597,33 @@ class TradingService:
         return self._last_status
 
     def account(self) -> dict[str, Any]:
-        self._last_account = sanitize_for_browser(self._run_core(self._api.get_account))
-        self._emit("account.updated", self._last_account)
+        self._synchronize_account()
         return self._last_account
+
+    def _synchronize_account(self) -> dict[str, Any]:
+        projection = sanitize_for_browser(
+            self._account_sync.synchronize(
+                lambda: self._run_core(self._orchestrator.synchronize_account)
+            )
+        )
+        next_account = dict(projection.get("account", {}))
+        next_orders = dict(projection.get("orders", {}))
+        next_positions = dict(projection.get("positions", {}))
+        next_fills = list(projection.get("fills", []))
+        self._last_account_at_ms = now_ms()
+        if next_account != self._last_account:
+            self._last_account = next_account
+            self._emit("account.updated", self._last_account)
+        if next_orders != self._last_orders:
+            self._last_orders = next_orders
+            self._emit("orders.updated", self._last_orders)
+        if next_positions != self._last_positions:
+            self._last_positions = next_positions
+            self._emit("positions.updated", self._last_positions)
+        if next_fills != self._last_fills:
+            self._last_fills = next_fills
+            self._emit("fills.updated", {"fills": self._last_fills})
+        return projection
 
     def scan(self) -> dict[str, Any]:
         self._last_scan = sanitize_for_browser(self._run_core(self._api.scan))
@@ -449,12 +652,19 @@ class TradingService:
         return sanitize_for_browser(self._run_core(self._api.get_pending_plans))
 
     def orders(self) -> dict[str, Any]:
-        self._last_orders = sanitize_for_browser(self._run_core(self._api.get_orders))
+        if not self._last_orders:
+            self._synchronize_account()
         return self._last_orders
 
     def positions(self) -> dict[str, Any]:
-        self._last_positions = sanitize_for_browser(self._run_core(self._api.get_positions))
+        if not self._last_positions:
+            self._synchronize_account()
         return self._last_positions
+
+    def fills(self) -> list[dict[str, Any]]:
+        if not self._last_account:
+            self._synchronize_account()
+        return list(self._last_fills)
 
     def trades(self) -> list[dict[str, Any]]:
         return sanitize_for_browser(self._run_core(self._api.get_trades))
@@ -594,12 +804,17 @@ class TradingService:
             "plans": self.plans(limit=100),
             "orders": self._last_orders,
             "positions": self._last_positions,
+            "fills": self._last_fills,
             "trades": self.trades(),
+            "market": self._last_market,
+            "session": self.session_status(),
         }
 
     def _scheduler_loop(self) -> None:
         while not self._scheduler_stop.is_set():
-            interval = self._control.get().scan_interval_seconds
+            interval = float(
+                self.config.rules.get("runtime", {}).get("account_sync_interval_seconds", 3)
+            )
             try:
                 self.runtime_tick()
             except Exception as exc:
@@ -608,30 +823,61 @@ class TradingService:
 
     def runtime_tick(self) -> None:
         """One deterministic scheduler iteration, exposed for integration tests."""
-        self.refresh_health()
         control = self._control.get()
+        if self._realtime is not None:
+            stale = self._realtime.watchdog()
+            self._last_market = sanitize_for_browser(self._realtime.status())
+            if stale and control.session_state is SessionState.RUNNING:
+                self._session.degrade("REALTIME_MARKET_STALE")
+                self._emit("market.stale", {"symbols": list(stale)}, "FAIL_CLOSED")
+        if self._last_health_at_ms is None or now_ms() - self._last_health_at_ms >= 15_000:
+            self.refresh_health()
+        self._synchronize_account()
+        recovery = self._run_core(self._orchestrator.recover)
+        self._emit("orders.reconciled", {"results": recovery})
+        control = self._control.get()
+        positions = self._run_core(self._orchestrator.trade_store.managed_positions)
+        if (
+            control.session_state is SessionState.RUNNING
+            and any(item.protection_state != "PROTECTED" for item in positions)
+        ):
+            self._session.degrade("POSITION_UNPROTECTED")
+            self._emit("risk.position_unprotected", {}, "FAIL_CLOSED")
+            control = self._control.get()
+        if control.session_state is SessionState.FLATTENING:
+            result = self._session.continue_flatten()
+            self._emit("session.flatten", result, str(result.get("status", "FLATTENING")))
+            return
         if control.agent_runtime_state is not AgentRuntimeState.RUNNING:
             return
-        self._run_core(self._orchestrator.recover)
+        if self._realtime is not None:
+            return
         scan = self.scan()
         if (
             control.trading_mode is TradingMode.AUTO
             and control.auto_demo_enabled
             and control.execution_state is ExecutionState.ARMED
             and control.connection_state is ConnectionState.CONNECTED
-            and not control.kill_switch_active
+                and not control.kill_switch_active
+                and control.session_state is SessionState.RUNNING
         ):
             self._auto_execute(scan)
 
     def handle_runtime_failure(self, exc: Exception) -> None:
         current = self._control.get()
-        if current.agent_runtime_state is not AgentRuntimeState.STOPPED:
+        if current.session_state is SessionState.RUNNING:
+            try:
+                self._session.degrade(type(exc).__name__)
+            except Exception:
+                self._run_core(self._force_core_safe)
+        elif current.agent_runtime_state is not AgentRuntimeState.STOPPED:
             try:
                 self._transition(
                     "RUNTIME_FAILURE_FAIL_CLOSED", reason=type(exc).__name__,
                     agent_runtime_state=AgentRuntimeState.DEGRADED,
                     execution_state=ExecutionState.DISARMED,
                     connection_state=ConnectionState.STALE,
+                    session_state=SessionState.DEGRADED,
                 )
             except Exception:
                 self._run_core(self._force_core_safe)
@@ -647,7 +893,7 @@ class TradingService:
                 and control.connection_state is ConnectionState.CONNECTED
                 and control.agent_runtime_state is AgentRuntimeState.RUNNING
                 and not control.kill_switch_active
-                and self.client_stream_fresh()
+                and control.session_state is SessionState.RUNNING
             ):
                 return
             if not isinstance(result, dict):
@@ -657,8 +903,10 @@ class TradingService:
             plan_id = str(result.get("plan_id", ""))
             if not plan_id:
                 continue
-            outcome = self.approve_plan(plan_id, APPROVAL_CONFIRMATION)
-            self._emit("auto_demo.execution_result", outcome, str(outcome.get("reason", "PASS")))
+            outcome = sanitize_for_browser(
+                self._run_core(self._orchestrator.execute_plan_automatically, plan_id)
+            )
+            self._emit("auto_session.execution_result", outcome, str(outcome.get("reason", "PASS")))
 
     def close(self) -> None:
         if self._closed:
@@ -666,6 +914,9 @@ class TradingService:
         self._scheduler_stop.set()
         if self._scheduler is not None:
             self._scheduler.join(timeout=5)
+        if self._realtime is not None:
+            self._realtime.close()
+        self._event_worker.shutdown(wait=True, cancel_futures=True)
         try:
             self._run_core(self._orchestrator.state.disarm_execution)
             self._control.transition(
@@ -675,6 +926,7 @@ class TradingService:
                 trading_mode=TradingMode.STOPPED,
                 auto_demo_enabled=False,
                 connection_state=ConnectionState.DISCONNECTED,
+                session_state=SessionState.STOPPED,
             )
             self._run_core(self._orchestrator.close)
         finally:

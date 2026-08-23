@@ -21,6 +21,14 @@ class ExecutionState(str, Enum):
     ARMED = "ARMED"
 
 
+class SessionState(str, Enum):
+    STOPPED = "STOPPED"
+    RUNNING = "RUNNING"
+    PAUSED = "PAUSED"
+    FLATTENING = "FLATTENING"
+    DEGRADED = "DEGRADED"
+
+
 class AgentRuntimeState(str, Enum):
     STOPPED = "STOPPED"
     RUNNING = "RUNNING"
@@ -46,6 +54,7 @@ class ControlSnapshot:
     environment: EnvironmentState = EnvironmentState.DEMO
     live_setup_state: LiveSetupState = LiveSetupState.NOT_CONFIGURED
     execution_state: ExecutionState = ExecutionState.DISARMED
+    session_state: SessionState = SessionState.STOPPED
     agent_runtime_state: AgentRuntimeState = AgentRuntimeState.STOPPED
     trading_mode: TradingMode = TradingMode.STOPPED
     connection_state: ConnectionState = ConnectionState.DISCONNECTED

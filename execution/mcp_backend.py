@@ -36,7 +36,7 @@ class StdioMCPClient:
         try:
             self._request("initialize", {
                 "protocolVersion": "2025-06-18", "capabilities": {},
-                "clientInfo": {"name": "okx-agent-trade-kit", "version": "0.3.0"},
+                "clientInfo": {"name": "okx-agent-trade-kit", "version": "0.4.0"},
             })
             self._notify("notifications/initialized", {})
         except Exception:
@@ -295,6 +295,7 @@ class MCPBackend(BaseBackend):
             "fills_time_window": {"begin", "end"}.issubset(fill_properties),
             "fills_archive": "archive" in fill_properties,
             "concurrent_read_only": False,
+            "cancel_protection_order": "spot_cancel_algo_order" in tools,
         }
 
     def place_order(self, order: dict[str, Any]) -> dict[str, Any]:
@@ -309,6 +310,19 @@ class MCPBackend(BaseBackend):
 
     def cancel_order(self, symbol: str, order_id: str) -> dict[str, Any]:
         return self._call("spot_cancel_order", {"instId": symbol, "ordId": order_id})
+
+    def cancel_protection_order(self, symbol: str, order_id: str) -> dict[str, Any]:
+        if "spot_cancel_algo_order" not in self._tools():
+            raise NotImplementedError("PROTECTION_CANCEL_NOT_SUPPORTED")
+        properties = self._tool_properties("spot_cancel_algo_order")
+        arguments: dict[str, Any] = {"instId": symbol}
+        if "algoId" in properties:
+            arguments["algoId"] = order_id
+        elif "ordId" in properties:
+            arguments["ordId"] = order_id
+        else:
+            raise NotImplementedError("PROTECTION_CANCEL_SCHEMA_UNSUPPORTED")
+        return self._call("spot_cancel_algo_order", arguments)
 
     def close(self) -> None:
         if self._client:

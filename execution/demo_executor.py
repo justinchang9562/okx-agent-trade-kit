@@ -38,3 +38,22 @@ class DemoExecutor:
             "slTriggerPx": str(plan.stop), "slOrdPx": "-1",
             "tpTriggerPx": str(plan.take_profit), "tpOrdPx": "-1",
         })
+
+    def execute_managed_exit(
+        self, symbol: str, quantity: float, client_order_id: str,
+    ) -> dict[str, Any]:
+        """Close persisted Agent-owned spot inventory; never used for wallet inventory."""
+        status = self.backend.status()
+        if not status.available or not status.demo:
+            raise PreSubmitRejectedError("DEMO_EXECUTION_GUARD_BLOCKED")
+        if quantity <= 0:
+            raise PreSubmitRejectedError("INVALID_EXIT_QUANTITY")
+        return self.backend.place_order({
+            "instId": symbol,
+            "side": "sell",
+            "ordType": "market",
+            "sz": str(quantity),
+            "tdMode": "cash",
+            "tgtCcy": "base_ccy",
+            "clOrdId": client_order_id,
+        })

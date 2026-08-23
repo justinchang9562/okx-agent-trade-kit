@@ -152,7 +152,10 @@ def test_linked_protective_exit_fill_is_reconciled_to_closed(tmp_path, long_sign
     manager.submit(plan, "CONFIRM DEMO ORDER")
     backend.remote = {"ordId": "okx-1", "clOrdId": plan.plan_id, "state": "filled",
                       "accFillSz": ".01", "avgPx": "100"}
-    backend.protection = [{"clOrdId": plan.plan_id, "algoId": "exit-1"}]
+    backend.protection = [{
+        "clOrdId": plan.plan_id, "algoId": "exit-1", "state": "live", "sz": ".01",
+        "slTriggerPx": str(plan.stop), "tpTriggerPx": str(plan.take_profit),
+    }]
     backend.fills = [{"ordId": "okx-1", "side": "buy", "fillSz": ".01",
                       "fillPx": "100", "fee": ".01", "fillTime": str(now_ms())}]
     manager.reconcile_plan(plan.plan_id)
@@ -366,4 +369,4 @@ def test_mcp_tool_error_does_not_echo_sensitive_stderr_or_payload() -> None:
 
 
 def test_component_version_tracks_remediation_release() -> None:
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.4.0"

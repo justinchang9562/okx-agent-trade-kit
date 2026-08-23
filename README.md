@@ -1,94 +1,137 @@
-# OKX Agent Trade Kit — Core v0.3.0
+# OKX Operator-Controlled Automatic Trading Agent v0.4.0
 
-这是一个确定性的分钟级现货短线交易系统；当前运行路径使用已配置的 **OKX 模拟交易 MCP**。它遵循路径 B：Codex 仅作为控制与开发界面，交易决策由本地 Python 流水线完成。
+这是一个运行在本机、连接 **OKX Demo** 的自动现货交易 Agent。普通用户只需要四个操作：
 
-```text
-用户 -> Codex -> 交易代理 -> 市场数据 -> 指标 -> 策略
-     -> 风控 -> 仓位规模 -> 决策 -> 交易计划 -> 审批
-     -> 订单管理器 -> OKX 适配器 -> 模拟 MCP / CLI / 原生 API -> OKX
-```
+- START
+- PAUSE
+- STOP
+- FLATTEN ALL & STOP
 
-系统基于规则且可解释；它不承诺盈利，也不是高频交易（HFT）。策略不能下单，风控可以否决任何交易，现货看跌信号不会转化为合成做空，实盘交易处于锁定状态。
+START 是一次 session-level authorization。通过完整 Preflight 后，Agent 会自动观察实时行情，在
+确认的 1m K 线运行确定性策略，并依次经过 Risk Manager、仓位计算、Trade Decision、OrderManager
+和 OKX Agent Trade Kit MCP。运行中的合格交易不再要求逐笔人工审批。
 
-## 当前后端状态
+    用户 -> Local Dashboard -> AutoTradingSessionController
+                                |-> OKX Public WebSocket -> Local Market State
+                                |                         -> Strategy -> Risk Manager
+                                |                         -> Position Sizing -> Decision
+                                |                         -> OrderManager
+                                |-> Account / Orders / Fills reconciliation -> Risk Manager
+                                                          |
+                                                 OKX Agent Trade Kit MCP
+                                                          |
+                                                       OKX Demo
 
-- MCP：主后端；启动现有的 `okx-mcp-demo-trade` stdio 包装器。支持模拟市场、账户、现货查询及受保护的下单方法。
-- CLI：可检测到已安装的公开模拟市场路径；不会用于私有执行，因此状态显示为 `PARTIALLY_WORKING`。
-- 原生 REST/WebSocket：仅作为扩展边界，状态为 `NOT_CONFIGURED`。
-- 实盘：`LOCKED`；未启用任何实盘执行器实现。
+    Codex / AI -> 解释、分析、总结、配置帮助（不在交易 hot path）
 
-仓库不存储任何凭据。MCP 包装器仍从现有的本地安全配置中读取独立的模拟盘凭据。
+项目不是大型交易平台，也不是 HFT。当前只支持 BTC-USDT、ETH-USDT、SOL-USDT 三个 Spot
+交易对；不实现杠杆、Margin、永续、期货、合成做空、多交易所或 Live executor。系统不承诺盈利。
 
-## 安装
+## 会话语义
 
-需要 Python 3.11+。使用已安装的 `uv`：
+START 会在一个服务器端原子操作中检查：
 
-```bash
-uv sync --extra dev
-cd frontend && npm ci && npm run build && cd ..
-```
+- 环境必须为 Demo，Live 必须保持锁定；
+- OKX Agent Trade Kit Demo backend 可用且声明支持 attached TP/SL；
+- Public WebSocket、ticker、book 和 1m/3m/5m buffers 全部新鲜且已重同步；
+- 账户快照新鲜，Risk/Strategy/Execution backend 就绪；
+- Kill Switch 未启用；
+- 没有待核对的 SUBMISSION_UNKNOWN；
+- 没有 POSITION_UNPROTECTED。
 
-核心配置位于 `config/trading_rules.yaml`、`config/symbols.yaml` 和 `config/environments.yaml`。默认值为模拟盘、现货、以 1 分钟周期入场并由 3/5 分钟周期确认、显式审批、单笔风险 0.5%、最大持仓名义价值 10%、单日 3% 熔断，以及连续三次亏损后暂停。这些是工程默认设置，并非投资建议。
+全部通过后，内部自动进入 RUNNING / AUTO enabled / Execution ARMED。PAUSED 状态再次点击
+START 即 Resume，并重新执行 Preflight。进程重启永远回到 STOPPED / AUTO off / DISARMED。
 
-## 命令
+PAUSE 会立即阻止新入场并取消 Agent pending entry，但保留现有仓位、SL、TP、行情监听、仓位
+监控和 reconciliation。STOP 同样阻止新入场并取消 pending entry，同时结束本次自动会话；
+它不会强制平仓，也不会移除保护单。
 
-```bash
-uv run python -m trading_agent status
-uv run python -m trading_agent health
-uv run python -m trading_agent scan
-uv run python -m trading_agent analyze BTC-USDT
-uv run python -m trading_agent dry-run BTC-USDT
-uv run python -m trading_agent positions
-uv run python -m trading_agent orders
-uv run python -m trading_agent pending
-uv run python -m trading_agent approve PLAN_ID
-uv run python -m trading_agent approve PLAN_ID --confirm "CONFIRM DEMO ORDER"
-uv run python -m trading_agent reject PLAN_ID
-uv run python -m trading_agent trades
-uv run python -m trading_agent recover
-uv run python -m trading_agent backtest BTC-USDT
-uv run python -m trading_agent backtest BTC-USDT --days 30
-uv run python -m trading_agent walk-forward BTC-USDT --days 7
-uv run python scripts/verify_demo_lifecycle.py --symbol BTC-USDT
-uv run python scripts/run_research_evaluation.py
-uv run pytest
-```
+FLATTEN ALL & STOP 只关闭 SQLite 中持久化的 Agent-managed Spot positions。手机或其他客户端
+创建的订单、钱包资产和外部持仓会显示为 EXTERNAL 并计入风险，但不会被自动接管、修改、取消
+或卖出。每个 close intent 和 client order ID 都会持久化；重复点击不会产生重复卖单。
+SUBMISSION_UNKNOWN 只会 reconciliation，禁止 blind retry。只有 managed exposure 确认归零后
+才会报告 FLAT，否则保持 FLATTENING / FLATTEN_INCOMPLETE。
 
-Demo 生命周期验证器默认仅执行 PRECHECK 并导出脱敏预览，不会下单；研究命令只使用独立的公共只读后端。真实 Demo
-生命周期必须由用户另行提供双重显式授权，且默认测试/CI 永远排除该路径。
+## 行情、执行与同步
 
-## 本地网页仪表板 v2.1
+自动会话的主要市场源是 OKX 官方 Public WebSocket：
 
-项目发布版本与 Dashboard 工作流版本是两个不同维度：当前 hardened Core/项目发布版本为
-`v0.3.0`，本地网页产品工作流名称继续保留为 `Dashboard v2.1`。前端包版本与项目发布版本同步为
-`0.3.0`，界面应显示为 `Dashboard v2.1 / Core v0.3.0`，避免把工作流版本误认为发布版本。
+- tickers、books5
+- candle1m、candle3m、candle5m
+- 本地 bounded rolling buffers、重复/乱序过滤、断线重同步和 freshness watchdog
 
-完成上述一次性安装后，可通过一条本地命令同时启动 API 与已构建的仪表板：
+完整策略仅在确认的 1m candle 触发；实时 ticker/book 只用于最新价格、spread、entry deviation、
+slippage、freshness 和最终提交前复核。MCP market reads 仍用于 bootstrap、watchdog fallback、
+diagnostics 和 research，不会改成高频 full polling。
 
-```bash
-uv run python -m trading_agent.web_server
-```
+账户、open orders、recent fills 和 managed positions 默认每 3 秒 single-flight 同步一次。所有交易
+写操作继续使用：
 
-打开 `http://127.0.0.1:8000`。支持的服务器仅绑定回环地址，并以单进程/单 worker 运行，使用唯一权威的 `TradingOrchestrator`。若缺少前端构建产物，该命令会先行构建；修改前端源码后，请使用 `uv run python -m trading_agent.web_server --rebuild-frontend`。
+    Trading Agent -> OrderManager -> OKX Agent Trade Kit MCP -> OKX Demo
 
-页面提供健康状态、账户/敞口、Scanner、Signals、TradePlans、Orders、Positions、Trades、Backtest/Walk-Forward、已脱敏日志、设置及带审计记录的控制界面。每次后端重启后，模拟执行均以 `DISARMED` 状态启动。ARM、代理启动、AUTO 和审批均要求已认证且新鲜的客户端 WebSocket ACK；只有服务器成功发送数据不会刷新控制面资格。Web 审批使用绑定 session/plan/preview 的 15 秒一次性 challenge，最终 API 不接受订单参数，并仍调用完整 Core 复核。AUTO DEMO 必须输入明确短语，默认禁用，且重启后绝不恢复。Kill Switch 会停止新入场/AUTO 并解除武装、跨重启保持 ACTIVE，但不会移除现有的 TP/SL 保护。
+项目没有重新实现 OKX private REST authentication 或原生交易栈。
 
-实盘仍为 `LIVE_NOT_CONFIGURED / LOCKED`；W8 尚未实现。请参阅[网页仪表板兼容性](docs/web-dashboard-compatibility.md)和 [API/WebSocket v1](docs/web-dashboard-api-v1.md)。
+## Safety Core
 
-`dry-run` 会获取最新模拟市场数据与账户状态，计算完整计划，但绝不会调用订单提交。`analyze` 会持久化一个带可配置 TTL 的可执行计划。唯一的执行入口是 `approve PLAN_ID`：未提供精确确认语时，仅生成最新的执行预览；提供精确确认语后，系统会重新获取市场/账户状态，并在 `OrderManager` 能够提交订单之前，再次执行陈旧数据、价差、敞口、单日亏损、连续亏损、重复、仓位规模、TTL、价格偏离和提交前滑点等保护检查。最终的委托价、止损和止盈将按照 OKX `tickSz` 做 Decimal 精度量化；最终的风险回报比、数量和风险金额会基于这些可执行价格重新计算。`STOPPED` 运行时状态会在编排层和最终执行器边界阻止一切新入场，但不移除已有保护订单。
+v0.3.0 hardened Core 的安全能力全部保留或加强：
 
-回测使用分页、完整性检查过的真实 OKX 历史 OHLCV，配合被忽略的本地缓存、生产级指标/策略/风控/仓位规模、下一根 K 线开盘执行、可注入的手续费/价差/滑点模型，以及同一根 K 线内止损与目标价的保守排序。下一根开盘可见后会共享生产审批的纯函数重新量化 RR 与仓位，失效交易按原因跳过。回测运行在独立 worker 与无凭据只读 MCP 进程上，Execution ARMED 时禁止启动。支持获取 7、30 和 90 天的数据。基础 walk-forward 路径报告滚动的样本外窗口，不进行参数调优。
+- RiskManager final veto、position sizing、单仓/总敞口、每日亏损、连续亏损、最大仓位数；
+- spread/slippage/deviation/freshness/duplicate/cooldown guards；
+- Decimal tick/lot quantization、TradePlan TTL、最小 RR；
+- 每个 Agent entry 必须同时存在正确、active、正确归属、tick-aware 价格一致且数量足够的 SL 和 TP；
+- SUBMISSION_UNKNOWN、client-order-ID reconciliation、no blind retry；
+- order/fill/protection reconciliation、Agent-managed 与 external wallet separation；
+- persistent Kill Switch、startup safe state、backtest isolation、repository safety 和 CI；
+- Demo only；Live LOCKED / NOT IMPLEMENTED。
 
-## 数据、监控与安全
+任何 realtime、account、backend、risk 或 reconciliation critical failure 都会 fail closed，阻止新入场
+并进入 DEGRADED；已有保护仍保留。
 
-SQLite `trading_agent.db` 存储计划、持久化订单状态转换、受管理仓位、实际/未知成交手续费、信号和交易。钱包资产不属于 Agent 管理仓位。`max_open_positions` 统计 Agent 管理的活动仓位及预留入场生命周期；预留入场的名义价值也会计入预估敞口。钱包敞口由 `max_total_exposure_pct` 单独限制；具有实质数量但无法定价的资产会以 `EXPOSURE_UNKNOWN` 阻止新入场，而不是按零值估算。结构化事件会写入 `logs/trading_agent.log`；这两个运行时文件均未纳入版本控制。
+## 安装与运行
 
-流水线会验证时间戳、数据时效性、缺失数据、价格、OHLC 完整性、K 线数量、价差、止损、目标价、风险回报比、仓位精度、最小数量、账户敞口、受管理仓位、单日亏损、连续亏损、冷却时间、重复计划、审批、模拟盘身份和实盘门禁。提交结果不确定时会被持久化，并按客户端订单 ID 对账，而非盲目重试。已成交入场但未验证保护订单的仓位将变为 `POSITION_UNPROTECTED`。系统会区分明确的本地或交易所拒绝，与可能已到达 OKX 的失败。生命周期状态转换使用原子 CAS；SQLite 仓库和 MCP stdio 通道以有限等待时间串行化共享访问。健康检查会将系统能力与当前交易资格分开报告。发生故障时会产生 HOLD/REJECT，且不会提交订单。
+需要 Python 3.11+、Node.js 和 uv：
 
-请参阅[架构](docs/architecture.md)、[策略](docs/strategy.md)、[风控措施](docs/risk-management.md)、[执行后端](docs/execution-backends.md)、[命令](docs/commands.md)和[从模拟盘到实盘](docs/demo-to-live.md)。
+    uv sync --extra dev
+    cd frontend
+    npm ci
+    npm run build
+    cd ..
+    uv run python -m trading_agent.web_server
 
-## 安全与发布
+打开 http://127.0.0.1:8000。服务只绑定 loopback，并使用单进程、单 worker 和一个权威
+TradingOrchestrator。配置文件：
 
-本项目只支持绑定 `127.0.0.1` 的 Demo 控制面；Live 仍为锁定且未实现。不要提交 OKX
-凭据、`.env`、数据库、日志、缓存或 audit export。公开仓库威胁模型与漏洞报告方式见
-[SECURITY.md](SECURITY.md)，发布前必须完成 [release checklist](docs/release-checklist.md)。
+- config/trading_rules.yaml
+- config/symbols.yaml
+- config/environments.yaml
+
+仓库不保存凭据；前端、API 响应和日志投影都会递归脱敏。
+
+## Advanced / Developer
+
+Scanner、manual TradePlan preview/approval、CLI approval、Backtest、Walk Forward、Research、raw
+logs、audit 和 runtime internals 保留用于诊断与开发，但不进入主要用户流程。常用只读命令：
+
+    uv run python -m trading_agent status
+    uv run python -m trading_agent health
+    uv run python -m trading_agent positions
+    uv run python -m trading_agent orders
+    uv run python -m trading_agent trades
+    uv run python -m trading_agent recover
+    uv run python -m trading_agent backtest BTC-USDT --days 7
+    uv run python scripts/run_research_evaluation.py
+
+scripts/verify_demo_lifecycle.py 默认只执行 PRECHECK，不会下单。任何真实 Demo lifecycle 都必须等待
+用户另行明确授权；常规测试、CI、本轮实现均不提交真实 Demo order。
+
+## 验证
+
+    uv run ruff check .
+    uv run pytest -q -m "not integration"
+    cd frontend
+    npm test -- --run
+    npm run build
+
+参阅 [架构](docs/architecture.md)、[API](docs/web-dashboard-api-v1.md)、
+[风险管理](docs/risk-management.md)、[执行后端](docs/execution-backends.md) 和
+[发布检查](docs/release-checklist.md)。

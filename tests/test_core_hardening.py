@@ -48,6 +48,8 @@ class LifecycleBackend:
             raise RuntimeError("NOT_FOUND")
         return {"data": {"data": [self.remote]}}
     def get_order(self, symbol, order_id): return {"data": {"data": [self.remote]}} if self.remote else {"data": {"data": []}}
+    def get_instrument(self, symbol):
+        return {"data": {"data": [{"tickSz": "0.1"}]}}
     def get_protection_orders(self, symbol=None): return {"data": {"data": self.protection}}
     def get_fills(self, symbol=None, *, order_id=None, **_kwargs):
         rows = self.fills if order_id is None else [
@@ -60,6 +62,14 @@ class LifecycleBackend:
 class Executor:
     def __init__(self, backend): self.backend = backend
     def execute(self, plan):
+        self.backend.protection = [{
+            "clOrdId": plan.plan_id,
+            "algoId": "exit-1",
+            "state": "live",
+            "sz": str(plan.position_size),
+            "slTriggerPx": str(plan.stop),
+            "tpTriggerPx": str(plan.take_profit),
+        }]
         return self.backend.place_order({"clOrdId": plan.plan_id, "sz": str(plan.position_size)})
 
 
@@ -159,6 +169,34 @@ def test_stop_failure_marks_position_unprotected_and_missing_fee_stays_null(tmp_
     assert store.order_for_plan(plan.plan_id)["fee"] is None
     trade = store.get_trades()[0]
     assert trade["fees"] is None and trade["fee_status"] == "UNKNOWN"
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ({"tpTriggerPx": ""}, "TAKE_PROFIT_NOT_VERIFIED"),
+        ({"slTriggerPx": ""}, "STOP_LOSS_NOT_VERIFIED"),
+        ({"sz": "0.001"}, "PROTECTION_QUANTITY_MISMATCH"),
+        ({"slTriggerPx": "1"}, "PROTECTION_PRICE_MISMATCH"),
+        ({"state": "cancelled"}, "PROTECTION_NOT_ACTIVE"),
+        ({"clOrdId": "unrelated-plan"}, "PROTECTION_NOT_FOUND"),
+    ],
+)
+def test_protection_requires_active_correct_sl_tp_price_and_quantity(
+    tmp_path, long_signal, mutation, expected,
+) -> None:
+    backend = LifecycleBackend()
+    plan, store, manager = setup_manager(tmp_path, long_signal, backend)
+    manager.submit(plan, "CONFIRM DEMO ORDER")
+    backend.remote = {
+        "ordId": "okx-1", "clOrdId": plan.plan_id, "state": "filled",
+        "accFillSz": "0.01", "avgPx": "100",
+    }
+    backend.protection[0].update(mutation)
+    result = manager.reconcile_plan(plan.plan_id)
+    assert result["state"] == "POSITION_UNPROTECTED"
+    assert store.managed_positions()[0].protection_state == expected
     store.close()
 
 

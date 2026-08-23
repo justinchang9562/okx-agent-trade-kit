@@ -73,6 +73,9 @@ class BaseBackend(ABC):
     def get_protection_orders(self, symbol: str | None = None) -> dict[str, Any]:
         raise NotImplementedError("TP_SL_BACKEND_NOT_SUPPORTED")
 
+    def cancel_protection_order(self, symbol: str, order_id: str) -> dict[str, Any]:
+        raise NotImplementedError("PROTECTION_CANCEL_NOT_SUPPORTED")
+
     def capabilities(self) -> dict[str, Any]:
         return {
             "client_order_id": False,
@@ -83,6 +86,7 @@ class BaseBackend(ABC):
             "fills_time_window": False,
             "fills_archive": False,
             "concurrent_read_only": False,
+            "cancel_protection_order": False,
         }
 
     @abstractmethod

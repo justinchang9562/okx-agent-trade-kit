@@ -15,6 +15,7 @@ from trading_agent.control_state import (
     EnvironmentState,
     ExecutionState,
     LiveSetupState,
+    SessionState,
     TradingMode,
 )
 
@@ -61,6 +62,7 @@ class ControlStore:
             environment=EnvironmentState(row["environment"]),
             live_setup_state=LiveSetupState(row["live_setup_state"]),
             execution_state=ExecutionState(row["execution_state"]),
+            session_state=SessionState(row["session_state"]),
             agent_runtime_state=AgentRuntimeState(row["agent_runtime_state"]),
             trading_mode=TradingMode(row["trading_mode"]),
             connection_state=ConnectionState(row["connection_state"]),
@@ -101,14 +103,15 @@ class ControlStore:
     def _write(self, state: ControlSnapshot, *, commit: bool = True) -> None:
         self.connection.execute(
             """INSERT INTO control_state
-               (id, environment, live_setup_state, execution_state, agent_runtime_state,
+               (id, environment, live_setup_state, execution_state, session_state, agent_runtime_state,
                 trading_mode, connection_state, kill_switch_active, auto_demo_enabled,
                 scan_interval_seconds, updated_at_ms)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  environment=excluded.environment,
                  live_setup_state=excluded.live_setup_state,
                  execution_state=excluded.execution_state,
+                 session_state=excluded.session_state,
                  agent_runtime_state=excluded.agent_runtime_state,
                  trading_mode=excluded.trading_mode,
                  connection_state=excluded.connection_state,
@@ -118,7 +121,7 @@ class ControlStore:
                  updated_at_ms=excluded.updated_at_ms""",
             (
                 state.environment.value, state.live_setup_state.value,
-                state.execution_state.value, state.agent_runtime_state.value,
+                state.execution_state.value, state.session_state.value, state.agent_runtime_state.value,
                 state.trading_mode.value, state.connection_state.value,
                 int(state.kill_switch_active), int(state.auto_demo_enabled),
                 state.scan_interval_seconds, state.updated_at_ms,

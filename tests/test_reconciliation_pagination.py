@@ -59,7 +59,10 @@ def prepared_manager(tmp_path, long_signal, backend):
         "ordId": "entry-1", "clOrdId": plan.plan_id, "state": "filled",
         "accFillSz": ".01", "avgPx": "100",
     }
-    backend.protection = [{"clOrdId": plan.plan_id, "algoId": "exit-1"}]
+    backend.protection = [{
+        "clOrdId": plan.plan_id, "algoId": "exit-1", "state": "live", "sz": ".01",
+        "slTriggerPx": str(plan.stop), "tpTriggerPx": str(plan.take_profit),
+    }]
     manager.reconcile_plan(plan.plan_id)
     return plan, store, manager
 

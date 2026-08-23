@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 - 2026-08-23
+
+Final product consolidation into an operator-controlled automatic Demo trading agent.
+
+- Added one authoritative `AutoTradingSessionController` for START, PAUSE, STOP and idempotent
+  FLATTEN ALL & STOP semantics.
+- Moved per-trade human approval out of the main AUTO session while preserving final deterministic
+  strategy, risk, sizing, freshness, slippage and OrderManager checks.
+- Connected confirmed 1m strategy evaluation to the OKX official Public WebSocket local market state;
+  3m/5m confirmation buffers and realtime execution revalidation remain mandatory.
+- Added a 3-second single-flight account/order/fill synchronizer and explicit AGENT/EXTERNAL ownership.
+- Strengthened protection verification to require active, correctly linked, tick-aware SL and TP with
+  sufficient quantity.
+- Simplified the Dashboard to session status plus START, PAUSE, STOP and FLATTEN ALL & STOP.
+
+No actual Demo order was submitted during this implementation. Live remains locked and unimplemented.
+
 ## 0.3.0 - 2026-08-23
 
 Hardened remediation release for the Local Web Dashboard v2.1 workstream.

@@ -125,6 +125,10 @@ def create_app(service: TradingService | None = None) -> FastAPI:
     async def status(request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(current_service(request).status)
 
+    @app.get(f"{API_PREFIX}/session/status", dependencies=read_auth, tags=["session-control"])
+    async def session_status(request: Request) -> dict[str, Any]:
+        return await asyncio.to_thread(current_service(request).session_status)
+
     @app.get(f"{API_PREFIX}/health", dependencies=read_auth, tags=["system"])
     async def health(request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(current_service(request).refresh_health)
@@ -172,6 +176,10 @@ def create_app(service: TradingService | None = None) -> FastAPI:
     async def trades(request: Request) -> list[dict[str, Any]]:
         return await asyncio.to_thread(current_service(request).trades)
 
+    @app.get(f"{API_PREFIX}/fills", dependencies=read_auth, tags=["trading-data"])
+    async def fills(request: Request) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(current_service(request).fills)
+
     @app.get(f"{API_PREFIX}/logs", dependencies=read_auth, tags=["observability"])
     async def logs(request: Request, limit: int = Query(200, ge=1, le=1000)) -> list[str]:
         return await asyncio.to_thread(current_service(request).logs, limit)
@@ -190,11 +198,33 @@ def create_app(service: TradingService | None = None) -> FastAPI:
             current_service(request).update_runtime_settings, body.scan_interval_seconds,
         )
 
-    @app.post(f"{API_PREFIX}/environment", dependencies=write_auth, tags=["controls"])
+    @app.post(f"{API_PREFIX}/session/start", dependencies=high_risk_auth, tags=["session-control"])
+    async def start_session(request: Request) -> dict[str, Any]:
+        return await asyncio.to_thread(current_service(request).start_session)
+
+    @app.post(f"{API_PREFIX}/session/pause", dependencies=write_auth, tags=["session-control"])
+    async def pause_session(request: Request) -> dict[str, Any]:
+        return await asyncio.to_thread(current_service(request).pause_session)
+
+    @app.post(f"{API_PREFIX}/session/stop", dependencies=write_auth, tags=["session-control"])
+    async def stop_session(request: Request) -> dict[str, Any]:
+        return await asyncio.to_thread(current_service(request).stop_session)
+
+    @app.post(f"{API_PREFIX}/session/flatten", dependencies=high_risk_auth, tags=["session-control"])
+    async def flatten_session(request: Request) -> dict[str, Any]:
+        return await asyncio.to_thread(current_service(request).flatten_session)
+
+    @app.post(
+        f"{API_PREFIX}/environment", dependencies=write_auth,
+        tags=["advanced-compatibility"], deprecated=True,
+    )
     async def environment(body: EnvironmentRequest, request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(current_service(request).set_environment, body.environment)
 
-    @app.post(f"{API_PREFIX}/mode", dependencies=write_auth, tags=["controls"])
+    @app.post(
+        f"{API_PREFIX}/mode", dependencies=write_auth,
+        tags=["advanced-compatibility"], deprecated=True,
+    )
     async def mode(body: ModeRequest, request: Request) -> dict[str, Any]:
         if body.mode == "AUTO" and not request.app.state.sessions.websocket_fresh(
             request.cookies.get(SESSION_COOKIE)
@@ -202,27 +232,45 @@ def create_app(service: TradingService | None = None) -> FastAPI:
             raise ServiceError("WEBSOCKET_NOT_FRESH", 423)
         return await asyncio.to_thread(current_service(request).set_mode, body.mode)
 
-    @app.post(f"{API_PREFIX}/execution/arm", dependencies=high_risk_auth, tags=["controls"])
+    @app.post(
+        f"{API_PREFIX}/execution/arm", dependencies=high_risk_auth,
+        tags=["advanced-compatibility"], deprecated=True,
+    )
     async def arm(request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(current_service(request).arm)
 
-    @app.post(f"{API_PREFIX}/execution/disarm", dependencies=write_auth, tags=["controls"])
+    @app.post(
+        f"{API_PREFIX}/execution/disarm", dependencies=write_auth,
+        tags=["advanced-compatibility"], deprecated=True,
+    )
     async def disarm(request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(current_service(request).disarm)
 
-    @app.post(f"{API_PREFIX}/agent/start", dependencies=high_risk_auth, tags=["controls"])
+    @app.post(
+        f"{API_PREFIX}/agent/start", dependencies=high_risk_auth,
+        tags=["advanced-compatibility"], deprecated=True,
+    )
     async def start_agent(request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(current_service(request).start_agent)
 
-    @app.post(f"{API_PREFIX}/agent/stop", dependencies=write_auth, tags=["controls"])
+    @app.post(
+        f"{API_PREFIX}/agent/stop", dependencies=write_auth,
+        tags=["advanced-compatibility"], deprecated=True,
+    )
     async def stop_agent(request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(current_service(request).stop_agent)
 
-    @app.post(f"{API_PREFIX}/auto-demo/enable", dependencies=high_risk_auth, tags=["controls"])
+    @app.post(
+        f"{API_PREFIX}/auto-demo/enable", dependencies=high_risk_auth,
+        tags=["advanced-compatibility"], deprecated=True,
+    )
     async def enable_auto(body: ConfirmationRequest, request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(current_service(request).enable_auto_demo, body.confirmation)
 
-    @app.post(f"{API_PREFIX}/auto-demo/disable", dependencies=write_auth, tags=["controls"])
+    @app.post(
+        f"{API_PREFIX}/auto-demo/disable", dependencies=write_auth,
+        tags=["advanced-compatibility"], deprecated=True,
+    )
     async def disable_auto(request: Request) -> dict[str, Any]:
         return await asyncio.to_thread(current_service(request).disable_auto_demo)
 

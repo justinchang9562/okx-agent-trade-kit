@@ -7,6 +7,7 @@ from typing import Any
 from data.account_data import AccountDataService
 from data.market_data import MarketDataService
 from data.models import AccountSnapshot, MarketSnapshot
+from data.realtime.snapshot_provider import MarketSnapshotProvider, PollingMarketSnapshotProvider
 from decision.decision_engine import DecisionEngine
 from decision.trade_plan import TradePlan
 from execution.demo_executor import DemoExecutor
@@ -75,6 +76,7 @@ class TradingOrchestrator:
         self.config = config
         self.adapter = adapter or OKXAdapter(config.backend)
         self.market_data = MarketDataService(self.adapter.backend, config.rules)
+        self.market_provider: MarketSnapshotProvider = PollingMarketSnapshotProvider(self.market_data)
         self.account_data = AccountDataService(self.adapter.backend)
         strategy_version = str(config.rules.get("strategy_version", PRODUCTION_STRATEGY_VERSION))
         self.strategy = build_strategy(strategy_version, config.rules, production=True)
@@ -94,6 +96,14 @@ class TradingOrchestrator:
             self.trade_store,
         )
         self.logger = configure_logging(config.root / "logs" / "trading_agent.log")
+
+    def set_market_provider(self, provider: MarketSnapshotProvider) -> None:
+        self.market_provider = provider
+
+    def _market_snapshot(self, symbol: str) -> MarketSnapshot:
+        if isinstance(self.market_provider, PollingMarketSnapshotProvider):
+            return self.market_data.get_snapshot(symbol)
+        return self.market_provider.get_snapshot(symbol)
 
     def _wallet_prices(self, current_market: MarketSnapshot, account: AccountSnapshot) -> dict[str, float]:
         prices = {current_market.instrument.base_currency: current_market.price}
@@ -157,7 +167,7 @@ class TradingOrchestrator:
         symbol = symbol.upper()
         if symbol not in self.config.symbols:
             raise ValueError(f"SYMBOL_NOT_CONFIGURED:{symbol}")
-        market = self.market_data.get_snapshot(symbol)
+        market = self._market_snapshot(symbol)
         account = self.account_data.get_snapshot(symbol)
         signal, risk_decision, sizing, exposure = self._risk_and_sizing(market, account)
         plan = self.decision.build_plan(
@@ -182,6 +192,7 @@ class TradingOrchestrator:
         *,
         position_size_cap: float | None = None,
         expected_preview: dict[str, Any] | None = None,
+        session_authorized: bool = False,
     ) -> dict[str, Any]:
         if not self.state.allows_new_entries:
             return {"status": "REJECTED", "reason": "TRADING_STOPPED", "plan_id": plan_id}
@@ -194,7 +205,7 @@ class TradingOrchestrator:
         if plan.is_expired(current_ms):
             self.trade_store.reject_plan(plan_id, "PLAN_EXPIRED")
             return {"status": "REJECTED", "reason": "PLAN_EXPIRED", "plan_id": plan_id}
-        market = self.market_data.get_snapshot(plan.symbol)
+        market = self._market_snapshot(plan.symbol)
         account = self.account_data.get_snapshot(plan.symbol)
         fresh_signal = self.strategy.analyze(market)
         if fresh_signal.side != "LONG":
@@ -300,12 +311,19 @@ class TradingOrchestrator:
                     "plan_id": plan_id,
                     "change_pct": changes,
                 }
-        if approval_text.strip() not in EXPLICIT_APPROVALS:
+        if not session_authorized and approval_text.strip() not in EXPLICIT_APPROVALS:
             return preview | {"execution": "BLOCKED_EXPLICIT_APPROVAL_REQUIRED"}
         if not self.trade_store.update_pending_plan_snapshot(final_plan):
             return {"status": "REJECTED", "reason": "PLAN_NOT_PENDING", "plan_id": plan_id}
-        result = self.order_manager.submit(final_plan, approval_text, expected_price=executable_price)
+        result = (
+            self.order_manager.submit_automatic(final_plan, expected_price=executable_price)
+            if session_authorized
+            else self.order_manager.submit(final_plan, approval_text, expected_price=executable_price)
+        )
         return preview | {"status": result.get("state", "SUBMITTED"), "execution": result}
+
+    def execute_plan_automatically(self, plan_id: str) -> dict[str, Any]:
+        return self.approve_plan(plan_id, session_authorized=True)
 
     def reject_plan(self, plan_id: str) -> dict[str, Any]:
         rejected = self.trade_store.reject_plan(plan_id, "USER_REJECTED")
@@ -316,6 +334,12 @@ class TradingOrchestrator:
 
     def recover(self) -> list[dict[str, Any]]:
         return self.order_manager.recover_active_orders()
+
+    def cancel_pending_entries(self) -> list[dict[str, Any]]:
+        return self.order_manager.cancel_pending_entries()
+
+    def flatten_managed_positions(self) -> list[dict[str, Any]]:
+        return self.order_manager.flatten_managed_positions()
 
     def scan(self) -> dict[str, Any]:
         output: dict[str, Any] = {}
@@ -329,7 +353,7 @@ class TradingOrchestrator:
     def positions(self) -> dict[str, Any]:
         account = self.account_data.get_snapshot()
         try:
-            reference_market = self.market_data.get_snapshot(self.config.symbols[0])
+            reference_market = self._market_snapshot(self.config.symbols[0])
             exposure: dict[str, Any] | str = asdict(self._exposure(account, reference_market))
         except Exception:
             exposure = "DATA_UNAVAILABLE"
@@ -361,7 +385,7 @@ class TradingOrchestrator:
     def account(self) -> dict[str, Any]:
         account = self.account_data.get_snapshot()
         try:
-            market = self.market_data.get_snapshot(self.config.symbols[0])
+            market = self._market_snapshot(self.config.symbols[0])
             exposure: dict[str, Any] | str = asdict(self._exposure(account, market))
         except Exception:
             exposure = "DATA_UNAVAILABLE"
@@ -374,6 +398,74 @@ class TradingOrchestrator:
             "open_order_count": len(account.open_orders),
             "fill_count": len(account.fills),
             "exposure": exposure,
+        }
+
+    def synchronize_account(self) -> dict[str, Any]:
+        """One account read fan-outs into dashboard projections and ownership tags."""
+        account = self.account_data.get_snapshot()
+        lifecycle = self.trade_store.get_orders()
+        client_ids = {
+            str(row.get("client_order_id")) for row in lifecycle if row.get("client_order_id")
+        }
+        order_ids = {str(row.get("okx_order_id")) for row in lifecycle if row.get("okx_order_id")}
+
+        def origin(order_id: str, client_order_id: str = "") -> str:
+            return "AGENT" if (
+                bool(order_id) and order_id in order_ids
+                or bool(client_order_id) and client_order_id in client_ids
+            ) else "EXTERNAL"
+
+        orders = [
+            asdict(order) | {"origin": origin(order.order_id, order.client_order_id)}
+            for order in account.open_orders
+        ]
+        fills = [asdict(fill) | {"origin": origin(fill.order_id)} for fill in account.fills]
+        managed = self.trade_store.managed_positions()
+        managed_by_currency: dict[str, float] = {}
+        for position in managed:
+            base = position.symbol.split("-")[0].upper()
+            managed_by_currency[base] = managed_by_currency.get(base, 0.0) + max(
+                0.0, position.quantity - position.exit_filled_quantity,
+            )
+        external_inventory = []
+        for balance in account.balances:
+            external = max(0.0, balance.equity - managed_by_currency.get(balance.currency, 0.0))
+            if external > 0 and balance.currency not in {"USDT", "USDC", "USD"}:
+                external_inventory.append({
+                    "currency": balance.currency,
+                    "quantity": external,
+                    "origin": "EXTERNAL",
+                    "managed": False,
+                })
+        try:
+            market = self._market_snapshot(self.config.symbols[0])
+            exposure: dict[str, Any] | str = asdict(self._exposure(account, market))
+        except Exception:
+            exposure = "DATA_UNAVAILABLE"
+        return {
+            "account": {
+                "timestamp_ms": account.timestamp_ms,
+                "equity_usdt": account.equity_usdt,
+                "available_usdt": account.available_usdt,
+                "daily_pnl": account.daily_pnl,
+                "wallet_balances": [asdict(balance) for balance in account.balances],
+                "open_order_count": len(orders),
+                "fill_count": len(fills),
+                "exposure": exposure,
+            },
+            "orders": {
+                "okx_open_orders": orders,
+                "agent_order_lifecycle": lifecycle,
+            },
+            "positions": {
+                "managed_positions": [asdict(item) | {"origin": "AGENT"} for item in managed],
+                "external_wallet_inventory": external_inventory,
+                "managed_open_positions": len(managed),
+                "position_slots_in_use": self.trade_store.position_slots_in_use(),
+                "reserved_entry_notional": self.trade_store.reserved_entry_notional(),
+                "account_exposure": exposure,
+            },
+            "fills": fills,
         }
 
     def get_status(self) -> dict[str, Any]:
@@ -410,7 +502,7 @@ class TradingOrchestrator:
             blocking_reasons.append("POSITION_UNPROTECTED")
         if health["system_capability"]["status"] == "READY":
             try:
-                market = self.market_data.get_snapshot(self.config.symbols[0])
+                market = self._market_snapshot(self.config.symbols[0])
                 account = self.account_data.get_snapshot(self.config.symbols[0])
                 exposure = self._exposure(account, market)
                 state = self.trade_store.daily_state()

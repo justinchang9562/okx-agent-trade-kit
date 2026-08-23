@@ -1,6 +1,6 @@
-import { render, screen, within } from '@testing-library/react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { highRiskWritesAllowed, resolveTheme, SafetyBar } from './App'
+import { flattenControlVisible, highRiskWritesAllowed, resolveTheme, SafetyBar } from './App'
 import { fieldLabel, t, translateCode } from './locales'
 import type { ControlState } from './types'
 
@@ -8,6 +8,7 @@ const control: ControlState = {
   environment: 'DEMO',
   live_setup_state: 'NOT_CONFIGURED',
   execution_state: 'DISARMED',
+  session_state: 'STOPPED',
   agent_runtime_state: 'STOPPED',
   trading_mode: 'STOPPED',
   connection_state: 'DISCONNECTED',
@@ -18,17 +19,23 @@ const control: ControlState = {
 }
 
 describe('SafetyBar', () => {
-  it('shows independent execution and stream safety state', () => {
-    render(<SafetyBar control={control} stream="STALE" />)
-    expect(screen.getByText('DEMO')).toBeInTheDocument()
-    expect(screen.getByText('DISARMED')).toBeInTheDocument()
-    expect(screen.getByText('STALE')).toBeInTheDocument()
+  it('shows the simplified session and stream safety state', () => {
+    const html = renderToStaticMarkup(<SafetyBar control={control} stream="STALE" />)
+    expect(html).toContain('DEMO')
+    expect(html).toContain('STOPPED')
+    expect(html).toContain('STALE')
   })
 
   it('fails closed when the WebSocket is stale', () => {
     expect(highRiskWritesAllowed({ ...control, connection_state: 'CONNECTED' }, 'CONNECTED')).toBe(true)
     expect(highRiskWritesAllowed({ ...control, connection_state: 'CONNECTED' }, 'STALE')).toBe(false)
     expect(highRiskWritesAllowed({ ...control, connection_state: 'STALE' }, 'CONNECTED')).toBe(false)
+  })
+
+  it('keeps flatten available for an active session even before a position appears', () => {
+    expect(flattenControlVisible('RUNNING', 0)).toBe(true)
+    expect(flattenControlVisible('STOPPED', 1)).toBe(true)
+    expect(flattenControlVisible('STOPPED', 0)).toBe(false)
   })
 })
 
@@ -63,12 +70,14 @@ describe('localized appearance preferences', () => {
   })
 
   it('renders the full OKX mark and localized safety states', () => {
-    render(<SafetyBar control={{ ...control, connection_state: 'CONNECTED' }} stream="CONNECTED" language="zh" />)
-    const safety = within(screen.getByLabelText('交易安全状态'))
-    expect(safety.getByText('OKX')).toBeInTheDocument()
-    expect(safety.getByText('模拟盘')).toBeInTheDocument()
-    expect(safety.getByText('已停止')).toBeInTheDocument()
-    expect(safety.getByText('未授权')).toBeInTheDocument()
-    expect(safety.getByText('已连接')).toBeInTheDocument()
+    const html = renderToStaticMarkup(
+      <SafetyBar control={{ ...control, connection_state: 'CONNECTED' }} stream="CONNECTED" language="zh" />,
+    )
+    expect(html).toContain('交易安全状态')
+    expect(html).toContain('OKX')
+    expect(html).toContain('模拟盘')
+    expect(html).toContain('已停止')
+    expect(html).not.toContain('>实时<')
+    expect(html.match(/已连接/g)).toHaveLength(2)
   })
 })

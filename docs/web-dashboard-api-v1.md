@@ -1,149 +1,99 @@
-# Local Web Dashboard API v1
+# Local Dashboard API v1
 
-Status: **FROZEN for W7**
+Base URL: http://127.0.0.1:8000/api/v1
 
-Base URL: `http://127.0.0.1:8000/api/v1`
+This is a local control plane over one authoritative Python trading agent. It is not an exchange
+proxy and accepts no credentials, arbitrary order payload, strategy result, risk override or Live
+instruction.
 
-OpenAPI: `GET /api/v1/openapi.json` and `/api/v1/docs`
+## Main session API
 
-This API is a local control plane over one authoritative Python
-`TradingOrchestrator`. It is not an exchange proxy. No route accepts OKX
-credentials, arbitrary order payloads, strategy results, risk overrides or Live
-execution instructions.
+| Method | Path | Meaning |
+|---|---|---|
+| GET | /session/status | User-level session, latest preflight, market and account freshness |
+| POST | /session/start | Atomic Preflight then START or Resume |
+| POST | /session/pause | Block entries, cancel Agent entry orders, preserve positions and SL/TP |
+| POST | /session/stop | End AUTO session, cancel Agent entry orders, preserve positions and SL/TP |
+| POST | /session/flatten | Idempotently close Agent-managed positions only, then STOP |
 
-## Transport and security contract
+START and FLATTEN require a fresh authenticated Dashboard WebSocket acknowledgement at the control
+boundary. Once START succeeds, a temporary browser disconnect does not revoke session-level
+authorization; automatic execution continues until PAUSE, STOP, FLATTEN, Kill Switch or a fail-closed
+runtime condition. The final executor independently requires RUNNING, ARMED, Demo and fresh realtime
+market state.
 
-1. The supported production server binds only to `127.0.0.1`, with one process
-   and one worker.
-2. Trusted hosts are `127.0.0.1`, `localhost` and the test host. A local-client
-   middleware rejects non-loopback clients.
-3. No CORS middleware is installed. Browsers use same-origin requests.
-4. `GET /session` creates an in-memory, eight-hour session. Its cookie is
-   `HttpOnly`, `SameSite=Strict`; the response body contains the CSRF token.
-5. All read endpoints except API documentation require the session cookie.
-   Every action endpoint additionally requires `X-CSRF-Token`.
-6. ARM, Agent start, AUTO enable, approval preview and approval submission also
-   require a currently authenticated WebSocket client acknowledgement. A stale or disconnected
-   stream fails `WEBSOCKET_NOT_FRESH` before the action handler runs.
-7. WebSocket is read-only except for strict
-   `{ "type": "heartbeat.ack", "sequence": <last_seen> }` acknowledgements. Any
-   other client message is rejected and can never trigger a control action. The
-   handshake checks both the session cookie and a localhost Origin.
-8. Browser projections recursively redact sensitive key names and authorization
-   values. Backend/adapter/executor objects are never serialized.
-9. Service errors use `{ "error": { "code": "...", "message": "..." } }`.
-   Unknown upstream error text is not exposed.
+No session endpoint accepts symbol, side, quantity, entry, stop, take profit or order type. Those
+remain server-owned outputs of Strategy, RiskManager, Position Sizing and Trade Decision.
 
 ## State model
 
-The following domains are orthogonal and are returned in `status.control`:
+status.control includes:
 
-| Domain | Values | Safety rule |
-|---|---|---|
-| `environment` | `DEMO`, `LIVE` | W0-W7 accepts only `DEMO`; Live returns `LIVE_NOT_CONFIGURED`. |
-| `live_setup_state` | `NOT_CONFIGURED`, `READ_ONLY_READY`, `TRADE_PERMISSION_READY` | W0-W7 reports `NOT_CONFIGURED`. |
-| `execution_state` | `DISARMED`, `ARMED` | Restart always writes `DISARMED`. |
-| `agent_runtime_state` | `STOPPED`, `RUNNING`, `DEGRADED`, `STALE` | Runtime failure disarms and degrades fail-closed. |
-| `trading_mode` | `STOPPED`, `DRY_RUN`, `MANUAL_APPROVAL`, `AUTO` | `AUTO` maps to Core `AUTO_DEMO`; it is default-off. |
-| `connection_state` | `CONNECTED`, `STALE`, `DISCONNECTED` | Derived from backend health; not execution authority. |
-| `kill_switch_active` | boolean | `true` blocks new entries/AUTO, DISARMS and stops runtime. |
-
-Every transition is persisted to `control_audit_log`. Startup forces
-`DEMO / DISARMED / STOPPED / AUTO disabled` before recovery, preserves only a
-valid scan interval, and preserves an ACTIVE Kill Switch until explicit reset.
-
-## Read endpoints
-
-| Method and path | Purpose |
+| Domain | Values |
 |---|---|
-| `GET /session` | Create/replace the local browser session and CSRF token. |
-| `GET /status` | Service controls, compatible Core status and permanent Live lock. |
-| `GET /health` | Fresh Core capability and trading-eligibility evaluation. |
-| `GET /account` | Demo account, balances and separated exposure projection. |
-| `GET /scanner` | Last scanner result without causing a new scan. |
-| `GET /signals?limit=` | Persisted normalized rule-score signals. |
-| `GET /plans?status=&limit=` | TradePlan history with additive UI lifecycle. |
-| `GET /plans/pending` | Non-expired server-owned pending plan IDs. |
-| `GET /orders` | OKX open orders and persisted Agent lifecycle. |
-| `GET /positions` | Wallet and Agent-managed positions as separate data. |
-| `GET /trades` | Fills/fees/slippage/PnL; unknown values remain null. |
-| `GET /logs?limit=` | Tail of the recursively redacted structured log. |
-| `GET /audit-log?limit=` | Persisted service control transition audit. |
-| `GET /settings` | Sanitized rules and runtime view. |
+| session_state | STOPPED, RUNNING, PAUSED, FLATTENING, DEGRADED |
+| environment | DEMO; LIVE requests fail LIVE_NOT_CONFIGURED |
+| execution_state | DISARMED, ARMED; internal safety state |
+| agent_runtime_state | STOPPED, RUNNING, DEGRADED, STALE; internal |
+| trading_mode | compatibility/internal; main UI never selects it |
+| connection_state | CONNECTED, STALE, DISCONNECTED |
+| kill_switch_active | persistent emergency entry block |
 
-## Action endpoints
+Startup always writes STOPPED / DISARMED / AUTO off before reconciliation. Kill Switch persists.
 
-| Method and path | Body | Contract |
-|---|---|---|
-| `POST /scanner/run` | none | Executes the Core scan; never submits. |
-| `POST /analyze/{symbol}` | none | Creates a Core TradePlan; never submits. |
-| `POST /environment` | `{environment}` | `DEMO` only; `LIVE` is locked. |
-| `POST /mode` | `{mode}` | Select mode; STOPPED also stops/disarms. |
-| `POST /agent/start` | none | Starts scan/reconciliation after a mode is selected. |
-| `POST /agent/stop` | none | Stops and disarms; does not cancel protection. |
-| `POST /execution/arm` | none | Requires fresh health and no risk blockers. |
-| `POST /execution/disarm` | none | Immediately prevents new entries. |
-| `POST /auto-demo/enable` | `{confirmation}` | Exact `ENABLE AUTO DEMO`; process/session only. |
-| `POST /auto-demo/disable` | none | Disables AUTO and disarms if AUTO was selected. |
-| `POST /kill-switch` | none | Stops/disarms/disables AUTO; preserves TP/SL. |
-| `POST /kill-switch/reset` | `{confirmation}` | Exact `RESET KILL SWITCH`; safe STOPPED/DISARMED. |
-| `POST /plans/{plan_id}/preview` | none | Fresh TTL/data/spread/risk/exposure/size/deviation preview plus one-time challenge. |
-| `POST /plans/{plan_id}/approve` | `{approval_challenge}` | One-time, session/plan/preview-bound Demo approval; no order fields. |
-| `POST /plans/{plan_id}/reject` | none | Rejects a still-pending plan. |
-| `POST /backtest` | `{symbol,days,walk_forward}` | 7/30/90-day backtest or walk-forward. |
-| `PUT /settings/runtime` | `{scan_interval_seconds}` | Allowlisted 5–3600 seconds only. |
+## Read API
 
-Approval does not accept `symbol`, `side`, `amount`, entry, TP, SL or order type.
-The 15-second challenge is consumed once and is not an order-parameter token.
-Core reloads the persisted plan and performs fresh revalidation; material price,
-size or risk drift requires a new preview. Duplicate plan approval remains
-blocked by challenge consumption, plan-state CAS and client-order-ID idempotency.
+| Path | Projection |
+|---|---|
+| GET /status | Session, Core, market, observability and permanent Live lock |
+| GET /health | Capability and current risk/trading blockers |
+| GET /account | Fresh Demo account and exposure |
+| GET /orders | Open orders tagged AGENT or EXTERNAL plus Agent lifecycle |
+| GET /positions | Agent-managed positions and separated external wallet inventory |
+| GET /fills | Recent fills tagged AGENT or EXTERNAL |
+| GET /trades | Persisted completed/active trade evidence and PnL |
+| GET /scanner | Latest confirmed-candle evaluation |
+| GET /signals | Persisted signals |
+| GET /plans | TradePlan history |
+| GET /logs | Redacted logs |
+| GET /audit-log | Persisted control transitions |
+| GET /settings | Sanitized configuration |
 
-Backtests use a separate one-thread service and public read-only MCP process.
-They return `BACKTEST_BLOCKED_WHILE_EXECUTION_ARMED` while ARMED and fail closed
-when an active runtime cannot safely share upstream read capacity.
+GET /session remains the local browser session/CSRF bootstrap endpoint.
 
-## WebSocket v1
+## Advanced compatibility API
 
-Endpoint: `ws://127.0.0.1:8000/api/v1/ws`
+The legacy environment, mode, agent start/stop, arm/disarm, AUTO enable/disable and per-plan
+preview/approval routes remain available for CLI diagnostics and compatibility. OpenAPI marks the
+main legacy control routes deprecated. The React primary flow does not call them.
 
-```json
-{
-  "schema_version": "1.0",
-  "sequence": 42,
-  "timestamp_ms": 1787414400000,
-  "type": "control.state",
-  "reason": "PASS",
-  "data": {}
-}
-```
+Backtest, Walk Forward, scanner, analyze and manual approval remain Advanced/Research/Developer
+features and never enter the automatic session hot path.
 
-`sequence` is process-local and monotonic. Reconnect begins with a full
-`snapshot`; clients replace their projection and then apply newer events.
-Heartbeats are sent each second. The browser marks the stream stale after seven
-seconds and acknowledges each received event with its last sequence. The server
-independently requires a client ACK not older than eight seconds; successful
-server sends do not refresh eligibility. Any fresh authenticated tab is enough,
-while all stale tabs fail closed.
-The same server-side freshness gate is used by AUTO DEMO and the DemoExecutor's
-last-moment entry guard, so closing every authenticated control stream stops all
-new automatic submissions without touching existing protection.
+## Transport security
 
-Stable event types:
+- Production binds only 127.0.0.1 with one process and one worker.
+- Trusted Host and loopback middleware reject non-local access; CORS is not enabled.
+- The session cookie is HttpOnly and SameSite=Strict; writes require CSRF.
+- WebSocket handshakes require the local Origin and session cookie.
+- WebSocket accepts only heartbeat acknowledgements and cannot issue control actions.
+- Browser projections recursively redact credential-like keys and bearer values.
+- Errors use stable error codes and do not expose upstream secret-bearing text.
 
-- `snapshot`, `snapshot.error`, `heartbeat`
-- `control.state`, `health.updated`, `account.updated`, `scanner.updated`
-- `plan.created`, `plan.revalidated`, `plan.approval_result`, `plan.rejected`
-- `orders.reconciled`, `orders.recovery_failed`
-- `auto_demo.execution_result`, `risk.kill_switch`
-- `backtest.completed`, `runtime.error`
+## WebSocket events
 
-Unknown future event types must be ignored. Additive fields may be added in v1;
-removing or renaming existing fields requires a new API version.
+Clients receive an initial snapshot, then monotonic process-local events:
 
-## macOS App reuse boundary
+- control.state, session.started, session.paused, session.stopped, session.flatten
+- health.updated, account.updated, orders.updated, positions.updated, fills.updated
+- scanner.updated, auto_session.execution_result
+- orders.reconciled, risk.position_unprotected, market.stale, runtime.error
+- heartbeat
 
-A future macOS client should use the same HTTP actions and WebSocket envelope.
-It must not link to MCP, read `.env`, construct exchange orders, or access SQLite
-directly. Native UI may add local session bootstrap, confirmations and reconnect
-logic, but Python remains the sole Strategy/Risk/Sizing/Decision/Execution owner.
+Unknown additive event types must be ignored. External mobile/manual account changes appear through
+the three-second Account Synchronizer; external objects are visible but never automatically
+controlled.
+
+## Live
+
+Live Trading is LOCKED / NOT IMPLEMENTED. There is no Live toggle or Live executor in this API.

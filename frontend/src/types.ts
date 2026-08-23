@@ -1,10 +1,12 @@
 export type Connection = 'CONNECTED' | 'STALE' | 'DISCONNECTED'
 export type TradingMode = 'STOPPED' | 'DRY_RUN' | 'MANUAL_APPROVAL' | 'AUTO'
+export type SessionState = 'STOPPED' | 'RUNNING' | 'PAUSED' | 'FLATTENING' | 'DEGRADED'
 
 export interface ControlState {
   environment: 'DEMO' | 'LIVE'
   live_setup_state: string
   execution_state: 'DISARMED' | 'ARMED'
+  session_state: SessionState
   agent_runtime_state: 'STOPPED' | 'RUNNING' | 'DEGRADED' | 'STALE'
   trading_mode: TradingMode
   connection_state: Connection
@@ -20,6 +22,8 @@ export interface StatusPayload {
   core: Record<string, unknown>
   live: { setup_state: string; execution: string }
   observability?: Record<string, unknown>
+  market?: Record<string, unknown>
+  session?: Record<string, unknown>
 }
 
 export interface Plan {
@@ -48,6 +52,9 @@ export interface DashboardData {
   plans: Plan[]
   orders?: Record<string, unknown>
   positions?: Record<string, unknown>
+  fills: Record<string, unknown>[]
+  market?: Record<string, unknown>
+  session?: Record<string, unknown>
   trades: Record<string, unknown>[]
   logs: string[]
   audit: Record<string, unknown>[]

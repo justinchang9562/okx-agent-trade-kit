@@ -178,10 +178,10 @@ export function t(language: Language, key: TextKey): string {
 }
 
 const codeZh: Record<string, string> = {
-  DEMO: '模拟盘', LIVE: '实盘', STOPPED: '已停止', RUNNING: '运行中', DEGRADED: '降级运行', STALE: '数据已过期',
+  DEMO: '模拟盘', LIVE: '实盘', STOPPED: '已停止', RUNNING: '运行中', PAUSED: '已暂停', FLATTENING: '平仓中', DEGRADED: '安全降级', STALE: '数据已过期',
   CONNECTED: '已连接', DISCONNECTED: '未连接', ARMED: '已授权', DISARMED: '未授权', DRY_RUN: '模拟演练',
   MANUAL_APPROVAL: '人工审批', AUTO: '自动模式', LOCKED: '已锁定', NOT_CONFIGURED: '未配置', CONFIGURED: '已配置',
-  ACTIVE: '已启用', OFF: '关闭', DISABLED: '已禁用', ENABLED: '已启用', AVAILABLE: '可用', UNAVAILABLE: '不可用',
+  ACTIVE: '已启用', OFF: '关闭', DISABLED: '已禁用', ENABLED: '已启用', AVAILABLE: '可用', UNAVAILABLE: '不可用', REALTIME: '实时', AGENT: 'Agent', EXTERNAL: '外部',
   READY: '就绪', NOT_READY: '未就绪', PARTIALLY_READY: '部分就绪', READ_ONLY_READY: '只读功能就绪',
   TRADE_PERMISSION_READY: '交易权限就绪', READY_FOR_CONTROLLED_DEMO_VALIDATION: '可进行受控模拟盘验证',
   READY_FOR_EXACT_APPROVAL: '可进行精确审批', PASS: '通过', FAIL: '失败', BLOCKED: '受阻', ELIGIBLE: '符合条件',

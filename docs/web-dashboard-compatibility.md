@@ -1,6 +1,10 @@
 # Local Web Dashboard v2.1 — Core Compatibility Review
 
-Status: W0-W7 compatibility baseline, hardened in project release v0.3.0
+Status: **Advanced compatibility reference only** after v0.4.0 product consolidation
+
+The primary product flow is now START / PAUSE / STOP / FLATTEN ALL & STOP through
+AutoTradingSessionController. Mode, Agent Start, ARM, AUTO enable and per-plan approval below are
+retained only for diagnostic/CLI compatibility and are intentionally absent from the main Dashboard.
 
 Source: `OKX_Local_Web_Dashboard_Plan_v2.1.pdf`, Core Hardening v0.2.1 and remediation v0.3.0
 

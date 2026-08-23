@@ -316,6 +316,66 @@ class TradeStore:
         return len(self.managed_positions(active_only=True))
 
     @synchronized
+    def flatten_intent(self, plan_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM flatten_intents WHERE plan_id = ?", (plan_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def create_flatten_intent(
+        self, plan_id: str, client_order_id: str, symbol: str, requested_quantity: float,
+    ) -> dict[str, Any]:
+        current = now_ms()
+        self.connection.execute(
+            """INSERT OR IGNORE INTO flatten_intents
+               (plan_id, client_order_id, symbol, requested_quantity, state,
+                created_at_ms, updated_at_ms)
+               VALUES (?, ?, ?, ?, 'PREPARED', ?, ?)""",
+            (plan_id, client_order_id, symbol, requested_quantity, current, current),
+        )
+        self.connection.commit()
+        intent = self.flatten_intent(plan_id)
+        if intent is None:
+            raise RuntimeError("FLATTEN_INTENT_PERSISTENCE_FAILED")
+        return intent
+
+    @synchronized
+    def update_flatten_intent(self, plan_id: str, state: str, **fields: Any) -> dict[str, Any]:
+        allowed = {"filled_quantity", "order_id", "raw_response_json", "last_error"}
+        invalid = set(fields).difference(allowed)
+        if invalid:
+            raise ValueError(f"INVALID_FLATTEN_INTENT_FIELDS:{sorted(invalid)}")
+        values = dict(fields)
+        values.update(state=state, updated_at_ms=now_ms())
+        assignments = ", ".join(f"{key} = ?" for key in values)
+        cursor = self.connection.execute(
+            f"UPDATE flatten_intents SET {assignments} WHERE plan_id = ?",
+            (*values.values(), plan_id),
+        )
+        if cursor.rowcount != 1:
+            self.connection.rollback()
+            raise LookupError("FLATTEN_INTENT_NOT_FOUND")
+        self.connection.commit()
+        intent = self.flatten_intent(plan_id)
+        if intent is None:
+            raise LookupError("FLATTEN_INTENT_NOT_FOUND")
+        return intent
+
+    @synchronized
+    def flatten_intents(self, active_only: bool = False) -> list[dict[str, Any]]:
+        if active_only:
+            rows = self.connection.execute(
+                "SELECT * FROM flatten_intents WHERE state NOT IN ('FILLED', 'CANCELLED') "
+                "ORDER BY created_at_ms"
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM flatten_intents ORDER BY created_at_ms"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @synchronized
     def position_slots_in_use(self, exclude_plan_id: str | None = None) -> int:
         """Count managed inventory and reserved entry orders once per plan."""
         reserved_states = tuple(sorted(ACTIVE_ORDER_STATES))

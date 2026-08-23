@@ -44,8 +44,8 @@ export async function write<T>(path: string, body?: unknown, method = 'POST'): P
 export async function loadDashboard(): Promise<DashboardData> {
   const paths = [
     '/status', '/health', '/account', '/scanner', '/signals?limit=100',
-    '/plans?limit=100', '/orders', '/positions', '/trades', '/logs?limit=200',
-    '/audit-log?limit=100', '/settings',
+    '/plans?limit=100', '/orders', '/positions', '/fills', '/trades', '/logs?limit=200',
+    '/audit-log?limit=100', '/settings', '/session/status',
   ]
   const results = await Promise.allSettled(paths.map((path) => get<unknown>(path)))
   const value = (index: number, fallback: unknown) =>
@@ -59,10 +59,12 @@ export async function loadDashboard(): Promise<DashboardData> {
     plans: value(5, []) as DashboardData['plans'],
     orders: value(6, {}) as Record<string, unknown>,
     positions: value(7, {}) as Record<string, unknown>,
-    trades: value(8, []) as Record<string, unknown>[],
-    logs: value(9, []) as string[],
-    audit: value(10, []) as Record<string, unknown>[],
-    settings: value(11, {}) as Record<string, unknown>,
+    fills: value(8, []) as Record<string, unknown>[],
+    trades: value(9, []) as Record<string, unknown>[],
+    logs: value(10, []) as string[],
+    audit: value(11, []) as Record<string, unknown>[],
+    settings: value(12, {}) as Record<string, unknown>,
+    session: value(13, {}) as Record<string, unknown>,
   }
 }
 

@@ -4,7 +4,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS control_state (
   environment TEXT NOT NULL,
   live_setup_state TEXT NOT NULL,
   execution_state TEXT NOT NULL,
+  session_state TEXT NOT NULL DEFAULT 'STOPPED',
   agent_runtime_state TEXT NOT NULL,
   trading_mode TEXT NOT NULL,
   connection_state TEXT NOT NULL,
@@ -76,6 +77,14 @@ CREATE TABLE IF NOT EXISTS managed_positions (
   FOREIGN KEY(plan_id) REFERENCES trade_plans(plan_id)
 );
 CREATE INDEX IF NOT EXISTS idx_managed_positions_state ON managed_positions(state);
+CREATE TABLE IF NOT EXISTS flatten_intents (
+  plan_id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL UNIQUE, symbol TEXT NOT NULL,
+  requested_quantity REAL NOT NULL, filled_quantity REAL NOT NULL DEFAULT 0,
+  order_id TEXT, state TEXT NOT NULL, created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL, raw_response_json TEXT, last_error TEXT,
+  FOREIGN KEY(plan_id) REFERENCES managed_positions(plan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_flatten_intents_state ON flatten_intents(state);
 CREATE TABLE IF NOT EXISTS reconciliation_cursors (
   symbol TEXT NOT NULL, stream_kind TEXT NOT NULL,
   last_timestamp_ms INTEGER, last_fill_id TEXT, updated_at_ms INTEGER NOT NULL,
@@ -118,6 +127,7 @@ def _ensure_column(connection: sqlite3.Connection, table: str, definition: str) 
 
 
 def _migrate(connection: sqlite3.Connection) -> None:
+    _ensure_column(connection, "control_state", "session_state TEXT NOT NULL DEFAULT 'STOPPED'")
     _ensure_column(connection, "signals", "signal_strength REAL")
     for definition in (
         "plan_id TEXT", "order_id TEXT", "entry_time_ms INTEGER", "exit_time_ms INTEGER",

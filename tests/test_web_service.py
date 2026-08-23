@@ -7,10 +7,12 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from execution.order_state import OrderState
 from storage.control_store import ControlStore
 from tests.test_approval_revalidation import agent
+from tests.test_core_hardening import plan_for
 from trading_agent.config import load_config
-from trading_agent.control_state import AgentRuntimeState, ExecutionState, TradingMode
+from trading_agent.control_state import AgentRuntimeState, ExecutionState, SessionState, TradingMode
 from trading_agent.service import (
     AUTO_DEMO_CONFIRMATION,
     KILL_SWITCH_RESET_CONFIRMATION,
@@ -68,6 +70,7 @@ def test_startup_always_disarms_and_disables_auto_demo(tmp_path, market, account
     try:
         state = service.control()
         assert state["execution_state"] == "DISARMED"
+        assert state["session_state"] == "STOPPED"
         assert state["agent_runtime_state"] == "STOPPED"
         assert state["trading_mode"] == "STOPPED"
         assert state["auto_demo_enabled"] is False
@@ -174,6 +177,8 @@ def test_approval_endpoint_accepts_plan_id_not_client_order_fields(tmp_path, mar
             assert set(properties) == {"approval_challenge"}
             required_paths = {
                 "/api/v1/status", "/api/v1/health", "/api/v1/account",
+                "/api/v1/session/status", "/api/v1/session/start",
+                "/api/v1/session/pause", "/api/v1/session/stop", "/api/v1/session/flatten",
                 "/api/v1/scanner", "/api/v1/scanner/run", "/api/v1/analyze/{symbol}",
                 "/api/v1/signals", "/api/v1/plans", "/api/v1/plans/pending",
                 "/api/v1/orders", "/api/v1/positions", "/api/v1/trades",
@@ -323,27 +328,113 @@ def test_kill_switch_preserves_existing_protective_orders(tmp_path, market, acco
         service.close()
 
 
-def test_auto_runtime_uses_existing_plan_id_and_exact_core_approval(tmp_path, market, account) -> None:
+def test_auto_session_uses_existing_plan_id_without_per_trade_user_approval(
+    tmp_path, market, account,
+) -> None:
     service = service_for(tmp_path, market, account)
     try:
-        service.enable_auto_demo(AUTO_DEMO_CONFIRMATION)
-        service.set_mode("AUTO")
-        service.start_agent()
-        service.arm()
-        calls: list[tuple[str, str]] = []
+        service._session_preflight = lambda: []
+        service.start_session()
+        calls: list[str] = []
         service.scan = lambda: {
             "BTC-USDT": {"decision": "BUY", "risk_approved": True, "plan_id": "server-plan-1"}
         }
-        service.approve_plan = lambda plan_id, confirmation: (
-            calls.append((plan_id, confirmation)) or {"status": "SUBMITTED"}
+        service._orchestrator.execute_plan_automatically = lambda plan_id: (
+            calls.append(plan_id) or {"status": "SUBMITTED"}
         )
+        service._synchronize_account = lambda: {}
         service.runtime_tick()
-        assert calls == [("server-plan-1", "CONFIRM DEMO ORDER")]
+        assert calls == ["server-plan-1"]
         service.client_stream_disconnected("test-control-stream")
         service.runtime_tick()
-        assert calls == [("server-plan-1", "CONFIRM DEMO ORDER")]
-        with pytest.raises(PermissionError, match="CONTROL_STREAM_NOT_FRESH"):
+        assert calls == ["server-plan-1", "server-plan-1"]
+        with pytest.raises(PermissionError, match="REALTIME_MARKET_NOT_CONFIGURED"):
             service._final_entry_guard()
+    finally:
+        service.close()
+
+
+def test_session_start_pause_stop_are_atomic_and_preserve_managed_protection(
+    tmp_path, market, account,
+) -> None:
+    service = service_for(tmp_path, market, account)
+    try:
+        service._session_preflight = lambda: []
+        started = service.start_session()
+        assert started["session_state"] == SessionState.RUNNING.value
+        control = service.control()
+        assert control["execution_state"] == "ARMED"
+        assert control["trading_mode"] == "AUTO"
+        assert control["auto_demo_enabled"] is True
+
+        plan = service._run_core(service._orchestrator.analyze, "BTC-USDT")
+        service._run_core(
+            service._orchestrator.trade_store.upsert_managed_position,
+            plan.plan_id, "entry-1", plan.symbol, 0.01, plan.entry,
+            "FILLED", "PROTECTED", ["sl-1", "tp-1"],
+        )
+        paused = service.pause_session()
+        assert paused["session_state"] == SessionState.PAUSED.value
+        position = service._run_core(service._orchestrator.trade_store.managed_positions)[0]
+        assert position.protection_state == "PROTECTED"
+        assert position.protective_order_ids_json == '["sl-1", "tp-1"]'
+
+        service._session_preflight = lambda: []
+        assert service.start_session()["session_state"] == SessionState.RUNNING.value
+        stopped = service.stop_session()
+        assert stopped["session_state"] == SessionState.STOPPED.value
+        position = service._run_core(service._orchestrator.trade_store.managed_positions)[0]
+        assert position.protection_state == "PROTECTED"
+    finally:
+        service.close()
+
+
+def test_flatten_does_not_report_flat_while_agent_entry_is_unresolved(
+    tmp_path, market, account, long_signal,
+) -> None:
+    service = service_for(tmp_path, market, account)
+    try:
+        plan = plan_for(long_signal)
+        service._run_core(service._orchestrator.trade_store.save_plan, plan)
+        service._run_core(
+            service._orchestrator.trade_store.approve_and_create_order,
+            plan, plan.plan_id, plan.entry,
+        )
+        service._run_core(
+            service._orchestrator.trade_store.transition_order,
+            plan.plan_id, OrderState.SUBMITTED.value,
+        )
+        service._run_core(
+            service._orchestrator.trade_store.transition_order,
+            plan.plan_id, OrderState.SUBMISSION_UNKNOWN.value,
+        )
+
+        first = service.flatten_session()
+        second = service._session.continue_flatten()
+
+        assert first["status"] == "FLATTEN_INCOMPLETE"
+        assert second["status"] == "FLATTEN_INCOMPLETE"
+        assert service.control()["session_state"] == SessionState.FLATTENING.value
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("blocker", [
+    "OKX_DEMO_BACKEND_UNAVAILABLE",
+    "REALTIME_MARKET_NOT_READY",
+    "KILL_SWITCH_ACTIVE",
+    "POSITION_UNPROTECTED",
+])
+def test_session_start_fails_closed_for_preflight_blockers(tmp_path, market, account, blocker) -> None:
+    service = service_for(tmp_path, market, account)
+    try:
+        service._session_preflight = lambda: [blocker]
+        with pytest.raises(ServiceError, match=blocker):
+            service.start_session()
+        control = service.control()
+        assert control["session_state"] == "STOPPED"
+        assert control["execution_state"] == "DISARMED"
+        assert control["auto_demo_enabled"] is False
     finally:
         service.close()
 

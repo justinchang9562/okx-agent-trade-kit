@@ -1,88 +1,135 @@
-# Architecture
+# Final Architecture — Operator-Controlled Automatic Trading Agent
 
-```text
-                         Codex
-                           |
-                    Control Layer
-                           |
-                    Trading Agent
-                           |
-                     Quant Engine
-              +------------+------------+
-              |            |            |
-          Indicators    Strategy       Risk (veto)
-                                        |
-                                 Position Sizing
-                                        |
-                                Decision / Plan
-                                        |
-                                     Approval
-                                        |
-                                  Order Manager
-                                        |
-                                    OKX Adapter
-                         +--------------+--------------+
-                         |              |              |
-                    Demo MCP           CLI        Native API
-                         |              |              |
-                                      OKX
-```
+## Product boundary
 
-`TradingOrchestrator` loads all three configuration files, retrieves normalized
-market/account snapshots, validates them, invokes the production strategy, asks
-the risk manager, sizes an approved signal, creates an immutable trade plan, and
-persists observations. It never silently submits.
+    Codex / AI
+      explains market, risk, trades and performance
+      never participates in tick-to-order execution
 
-The quant engine sees `MarketSnapshot`, `AccountSnapshot`, and `Instrument`, not
-MCP/CLI response shapes. Backend changes are limited to `execution/` and data
-normalization. Codex must not bypass this local pipeline.
+    User
+      |
+      v
+    Local Dashboard: START / PAUSE / STOP / FLATTEN ALL & STOP
+      |
+      v
+    AutoTradingSessionController
+      |-----------------------------------|
+      v                                   v
+    OKX Public WebSocket              AccountSynchronizer
+      |                               account/orders/fills (3s, single-flight)
+      v                                   |
+    RealtimeMarketState                   |
+      |                                   |
+      v                                   |
+    confirmed 1m -> Strategy              |
+      |                                   |
+      v                                   |
+    RiskManager <-------------------------|
+      |
+    Position Sizing
+      |
+    Trade Decision / immutable TradePlan
+      |
+    final realtime revalidation
+      |
+    OrderManager
+      |
+    OKX Agent Trade Kit MCP
+      |
+    OKX Demo
 
-Strategy produces a `Signal` only. It imports no execution code. Order Manager
-contains no indicators. DemoExecutor rechecks the environment and backend Demo
-capability at the final boundary. Plan IDs are deterministic per symbol, side,
-strategy, and minute, providing retry deduplication.
+The product is one Python process, one local React Dashboard, one SQLite database, one OKX
+Agent Trade Kit connection and one public realtime market stream. It deliberately does not add
+microservices, queues, Redis, Kafka, private REST reimplementation, derivatives or AI execution.
 
-Core v0.3.0 persists `TradePlan -> OrderLifecycle -> ManagedPosition -> Trade` in
-SQLite. Approval is only by `plan_id`; fresh data and risk are re-evaluated at
-approval. The lifecycle is committed before submission, and an uncertain
-transport result becomes `SUBMISSION_UNKNOWN` until client-order-ID
-reconciliation. Wallet assets remain account exposure and never become managed
-positions merely because their balances are non-zero. Submitted and otherwise
-reserved entry orders occupy position slots and projected notional before fill.
-Entry and protective-order identifiers link fill reconciliation to the eventual
-atomic `ManagedPosition`/trade/order `CLOSED` transition.
+## Authoritative responsibilities
 
-Order transitions use optimistic compare-and-swap updates, preventing a stale
-worker from overwriting a newer state. Repository connections use WAL, bounded
-busy waits and per-repository reentrant locks. The shared MCP stdio client admits
-one request at a time with a timeout, so concurrent future control requests
-cannot cross-match JSON-RPC responses. Its stderr is drained continuously and
-discarded without logging content.
+AutoTradingSessionController is the sole owner of user-level START, PAUSE, STOP and FLATTEN
+semantics. React only calls session endpoints. FastAPI performs local session/CSRF/loopback checks
+and forwards the request. TradingService serializes state changes and Core calls. Compatibility
+Mode/ARM/AUTO/Approval endpoints remain deprecated and are not part of the main UI.
 
-`LocalControlAPI` is the future UI boundary. It exposes status, health, scan,
-analyze, pending-plan approval/rejection, positions, orders, trades, and stop.
-It does not expose MCP objects, order-manager internals, or credentials.
-Web handlers call this facade through `TradingService` and do not access the MCP
-process or SQLite connections directly. Health distinguishes durable system capability
-from current trading eligibility such as STOPPED, exposure limits, reserved
-slots, kill switches, unknown submissions and unprotected positions.
+TradingOrchestrator owns normalized market/account inputs, deterministic indicators, strategy,
+RiskManager, sizing and final plan reconstruction. Strategy emits a Signal only and cannot import
+or call execution. RiskManager retains final veto at plan creation and again immediately before
+submission.
 
-The W0-W7 local Web control plane is an additional client boundary, not a new
-trading engine:
+OrderManager remains the only order lifecycle owner. Entry execution and managed exits go through
+DemoExecutor and the OKX Agent Trade Kit MCP backend. An order intent is persisted before a write.
+SUBMISSION_UNKNOWN is reconciled by client order ID and never blindly retried.
 
-```text
-React / TypeScript / Vite (localhost browser)
-        | same-origin session + CSRF + authenticated WebSocket ACK
-FastAPI /api/v1 (127.0.0.1, one process / one worker)
-        |
-TradingService (compatibility state, scheduler, audit)
-        +-> one-thread authoritative Core -> LocalControlAPI -> TradingOrchestrator
-        +-> one-thread BacktestService -> independent read-only MCP backend
-```
+## Realtime market path
 
-Scheduler reconciliation and AUTO approval use the serialized Core worker.
-Backtests cannot occupy it, cannot reuse the credential-bearing execution object,
-and are blocked while execution is ARMED. Browser state is a projection; Core
-TradePlan/order/managed-position rows remain authoritative. The WebSocket accepts
-only strict heartbeat acknowledgements and never accepts control actions. See
-[API/WebSocket v1](web-dashboard-api-v1.md).
+RealtimeMarketRuntime connects to OKX official public/business Demo WebSocket endpoints and
+subscribes only to tickers, books5 and candle1m/candle3m/candle5m for BTC-USDT, ETH-USDT and
+SOL-USDT. It maintains bounded local buffers, validates timestamps/OHLC/book values, rejects
+duplicates and out-of-order changes, detects missing intervals, and requires full resync after
+reconnect.
+
+Historical candle and instrument bootstrap remains read-only through Agent Trade Kit/MCP. Once
+ready, TradingOrchestrator reads MarketSnapshot from RealtimeMarketState. Full strategy evaluation
+runs once per confirmed 1m candle. Ticker/book changes update price, spread and final execution
+revalidation only.
+
+Disconnect, stale ticker/book/candles, incomplete buffers or failed resync disarms execution and
+moves a running session to DEGRADED. Existing SL/TP and reconciliation remain active.
+
+## Session state
+
+The user-visible states are STOPPED, RUNNING, PAUSED, FLATTENING and DEGRADED. Internal
+ExecutionState, TradingMode and AgentRuntimeState remain compatibility/safety details.
+
+- START runs all preflight reads and reconciliation before one atomic transition to RUNNING,
+  AUTO enabled and ARMED. Double START is idempotent.
+- PAUSE first disarms and blocks entries, then cancels only Agent entry orders. Runtime,
+  market, account, order, fill, position and protection monitoring continue.
+- STOP first disarms and blocks entries, then cancels Agent entry orders and ends the runtime
+  session. Managed positions and their SL/TP remain.
+- FLATTEN first disarms and persists FLATTENING, cancels Agent entry orders, then creates one
+  persistent close intent per Agent-managed position. It reaches STOPPED/FLAT only after managed
+  quantity is reconciled to zero.
+- Process startup always persists STOPPED, DISARMED and AUTO off while preserving Kill Switch and
+  reconciling existing managed positions.
+
+## Ownership and flatten safety
+
+ManagedPosition rows are created only from Agent order lifecycle fills. Wallet balances do not
+become managed merely because an asset exists. Account projections tag open orders and fills as
+AGENT only when their order/client ID matches persisted lifecycle data; otherwise they are
+EXTERNAL. External inventory is wallet balance minus persisted managed quantity.
+
+External assets remain visible and count toward total exposure. They are never auto-adopted,
+cancelled, modified or flattened. There is no account-wide flatten mode.
+
+flatten_intents stores plan ID, a deterministic hashed client order ID, requested and filled
+quantity, exchange order ID and submission state. Repeated calls reconcile the existing intent.
+Protection orders are cancelled only after the associated managed position is confirmed closed.
+
+## Protection verification
+
+A filled Agent entry is PROTECTED only when reconciliation finds:
+
+- both SL and TP linked to the correct entry plan/order;
+- active/effective order state;
+- trigger prices equal to the final plan using instrument tick-size tolerance;
+- each protection quantity covering actual filled position quantity.
+
+Missing, inactive, unknown, price-mismatched or quantity-mismatched protection becomes
+POSITION_UNPROTECTED. This immediately blocks further entries and causes a running session to
+degrade while reconciliation continues.
+
+## Account synchronization
+
+One serialized synchronization call fetches account, open orders and recent fills, then fans out
+account.updated, orders.updated, positions.updated and fills.updated only when projections change.
+The default interval is three seconds and overlapping polling is impossible because all Core/MCP
+access is serialized.
+
+## Durable safety core
+
+SQLite persists TradePlan -> OrderLifecycle -> ManagedPosition -> Trade plus reconciliation cursors,
+fill evidence, control audit and flatten intents. WAL, FULL synchronous mode, bounded busy timeout,
+CAS lifecycle transitions and per-store reentrant locks remain.
+
+Backtests use an independent read-only backend and worker and cannot call OrderManager. Live remains
+LOCKED / NOT IMPLEMENTED. Browser/API projections never receive credentials or backend objects.
