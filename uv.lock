@@ -258,6 +258,7 @@ name = "okx-agent-trade-kit"
 version = "0.4.2"
 source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "fastapi" },
     { name = "pyyaml" },
     { name = "uvicorn" },
@@ -275,6 +276,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2026.7.22,<2027" },
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28,<1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3,<10" },

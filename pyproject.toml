@@ -8,6 +8,7 @@ version = "0.4.2"
 description = "Deterministic minute-level OKX Demo spot scalping agent"
 requires-python = ">=3.11"
 dependencies = [
+  "certifi>=2026.7.22,<2027",
   "fastapi>=0.116,<1",
   "PyYAML>=6.0.2,<7",
   "uvicorn>=0.35,<1",

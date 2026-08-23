@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 from collections import deque
 
 import pytest
@@ -13,7 +14,7 @@ from data.realtime.subscriptions import (
     public_subscriptions,
     subscribe_payload,
 )
-from data.realtime.websocket_client import OKXPublicWebSocketClient
+from data.realtime.websocket_client import OKXPublicWebSocketClient, _verified_connect
 from tests.test_realtime_market import NOW_MS, SYMBOL, ready_state
 
 TIMEOUT = object()
@@ -73,14 +74,45 @@ def ack(channel: str) -> str:
     })
 
 
+def test_default_transport_uses_a_verified_certifi_context(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_connect(endpoint: str, **kwargs):
+        captured.update(endpoint=endpoint, **kwargs)
+        return object()
+
+    monkeypatch.setattr("data.realtime.websocket_client.websockets.connect", fake_connect)
+    _verified_connect(PUBLIC_DEMO_ENDPOINT)
+
+    context = captured["ssl"]
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode is ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert context.get_ca_certs()
+    assert captured["endpoint"] == PUBLIC_DEMO_ENDPOINT
+
+
 def test_subscribe_payload_and_all_ack_are_deterministic() -> None:
     arguments = public_subscriptions((SYMBOL,))
     websocket = FakeWebSocket([ack("tickers"), ack("books5")])
     client, state = client_for(websocket)
     state.mark_resyncing()
     asyncio.run(client._endpoint_loop("wss://fake", "public", arguments))
-    assert json.loads(websocket.sent[0]) == subscribe_payload(arguments, "v041-public")
+    assert json.loads(websocket.sent[0]) == subscribe_payload(arguments, "v042public")
     assert state.status()["symbols"][SYMBOL]["public_connected"] is True
+
+
+def test_subscribe_request_id_is_okx_compatible() -> None:
+    payload = subscribe_payload(public_subscriptions((SYMBOL,)), "v0.4.2-public")
+    assert payload["id"] == "v042public"
+    assert payload["id"].isascii()
+    assert payload["id"].isalnum()
+    assert len(payload["id"]) <= 32
+
+
+def test_subscribe_request_id_rejects_empty_normalized_value() -> None:
+    with pytest.raises(ValueError, match="OKX_WEBSOCKET_REQUEST_ID_INVALID"):
+        subscribe_payload([], "---")
 
 
 def test_partial_subscribe_ack_never_marks_endpoint_ready() -> None:
@@ -98,7 +130,7 @@ def test_business_endpoint_uses_exact_candle_subscriptions_and_all_ack() -> None
     client, state = client_for(websocket)
     state.mark_resyncing()
     asyncio.run(client._endpoint_loop("wss://fake", "business", arguments))
-    assert json.loads(websocket.sent[0]) == subscribe_payload(arguments, "v041-business")
+    assert json.loads(websocket.sent[0]) == subscribe_payload(arguments, "v042business")
     assert state.status()["symbols"][SYMBOL]["business_connected"] is True
 
 

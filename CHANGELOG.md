@@ -6,6 +6,8 @@
 - Added dedicated realtime market, signal history, approval, lifecycle, position, trade, and runtime views.
 - Unified timestamp, price, quantity, USDT, percent, PnL, duration, optional-value, and identifier formatting.
 - Added read-only managed-exposure, protection, display-dust, realtime runtime, and degraded-reason projections.
+- Fixed macOS Python CA verification for OKX Demo WebSockets and normalized subscription request IDs to OKX's
+  alphanumeric protocol requirement.
 - Preserved the five top safety chips, Approval Center primary navigation, spacious visual layout, Demo-only MCP path, and frozen v0.4.1 trading core.
 
 ## 0.4.1 - 2026-08-23

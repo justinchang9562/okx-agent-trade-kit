@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 import threading
 from collections.abc import Callable
 from typing import Any
 
+import certifi
 import websockets
 
 from data.realtime.market_state import RealtimeMarketState
@@ -19,6 +21,12 @@ from data.realtime.subscriptions import (
 )
 
 ConnectFactory = Callable[[str], Any]
+
+
+def _verified_connect(endpoint: str) -> Any:
+    """Connect with a bundled CA store instead of relying on macOS Python framework links."""
+    context = ssl.create_default_context(cafile=certifi.where())
+    return websockets.connect(endpoint, ssl=context)
 
 
 class OKXPublicWebSocketClient:
@@ -40,7 +48,7 @@ class OKXPublicWebSocketClient:
         self.state = state
         self.on_confirmed_candle = on_confirmed_candle
         self.resync = resync
-        self.connect_factory = connect_factory or websockets.connect
+        self.connect_factory = connect_factory or _verified_connect
         self.heartbeat_seconds = heartbeat_seconds
         self.pong_timeout_seconds = pong_timeout_seconds
         self.max_backoff_seconds = max_backoff_seconds
@@ -98,7 +106,7 @@ class OKXPublicWebSocketClient:
     ) -> None:
         connector = self.connect_factory(endpoint)
         async with connector as websocket:
-            await websocket.send(json.dumps(subscribe_payload(arguments, f"v041-{kind}")))
+            await websocket.send(json.dumps(subscribe_payload(arguments, f"v042{kind}")))
             pending_acks = {(item["channel"], item["instId"]) for item in arguments}
             pong_deadline: float | None = None
             loop = asyncio.get_running_loop()
@@ -127,7 +135,9 @@ class OKXPublicWebSocketClient:
                         self.state.mark_endpoint_connected(kind)
                     continue
                 if message.get("event") in {"error", "notice"}:
-                    raise ConnectionError(f"OKX_WEBSOCKET_{str(message.get('event')).upper()}")
+                    event = str(message.get("event")).upper()
+                    code = str(message.get("code", "UNKNOWN"))
+                    raise ConnectionError(f"OKX_WEBSOCKET_{event}:{code}")
                 for event in self.state.apply_message(message):
                     if event.timeframe == "1m":
                         self.on_confirmed_candle(event)
