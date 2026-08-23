@@ -163,6 +163,33 @@ class TradingOrchestrator:
         market = self._market_snapshot(self.config.symbols[0])
         return self._exposure(account, market)
 
+    def _managed_exposure_summary(
+        self, account: AccountSnapshot, managed: list[Any],
+    ) -> dict[str, Any]:
+        """Return presentation-only managed exposure without inferring wallet exposure."""
+        remaining = [
+            max(0.0, item.quantity - item.exit_filled_quantity)
+            for item in managed
+        ]
+        managed_exposure: float | None = 0.0
+        for item, quantity in zip(managed, remaining, strict=True):
+            if item.entry_price is None:
+                managed_exposure = None
+                break
+            managed_exposure += quantity * item.entry_price
+        return {
+            "managed_exposure_usdt": managed_exposure,
+            "managed_exposure_pct": (
+                managed_exposure / account.equity_usdt
+                if managed_exposure is not None and account.equity_usdt > 0 else None
+            ),
+            "protected_positions": sum(
+                1 for item in managed if item.protection_state == "PROTECTED"
+            ),
+            "total_managed_positions": len(managed),
+            "critical": any(item.protection_state != "PROTECTED" for item in managed),
+        }
+
     def _risk_and_sizing(
         self, market: MarketSnapshot, account: AccountSnapshot, duplicate: bool = False
     ) -> tuple[Any, RiskDecision, SizingResult, ExposureSnapshot]:
@@ -447,6 +474,10 @@ class TradingOrchestrator:
                 0.0, position.quantity - position.exit_filled_quantity,
             )
         external_inventory = []
+        risk_dust = float(
+            self.config.rules["risk"].get("unpriced_asset_dust_quantity", 0.0)
+        )
+        display_dust_quantity = max(risk_dust, 0.000001)
         for balance in account.balances:
             external = max(0.0, balance.equity - managed_by_currency.get(balance.currency, 0.0))
             if external > 0 and balance.currency not in {"USDT", "USDC", "USD"}:
@@ -455,6 +486,8 @@ class TradingOrchestrator:
                     "quantity": external,
                     "origin": "EXTERNAL",
                     "managed": False,
+                    # Presentation metadata only. Risk always consumes the original balance.
+                    "display_dust": external <= display_dust_quantity,
                 })
         try:
             exposure: dict[str, Any] | str = asdict(self._dashboard_exposure(account))
@@ -482,6 +515,8 @@ class TradingOrchestrator:
                 "position_slots_in_use": self.trade_store.position_slots_in_use(),
                 "reserved_entry_notional": self.trade_store.reserved_entry_notional(),
                 "account_exposure": exposure,
+                "exposure_summary": self._managed_exposure_summary(account, managed),
+                "display_dust_quantity": display_dust_quantity,
             },
             "fills": fills,
         }

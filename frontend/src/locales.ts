@@ -34,7 +34,7 @@ const en = {
   writeLockDetail: 'The live data stream is unavailable. Arming, approval, and AUTO controls are disabled.',
   equity: 'Equity',
   demoValuation: 'Demo valuation',
-  available: 'Available',
+  available: 'Available USDT',
   usdtAvailable: 'USDT available',
   managedSlots: 'Managed slots',
   walletExcluded: 'Wallet assets excluded',
@@ -50,10 +50,10 @@ const en = {
   accountExposure: 'Account exposure',
   exposureSubtitle: 'Wallet + agent-managed + reserved',
   dataUnavailable: 'Data unavailable',
-  configuredScanner: 'Configured symbol scanner',
+  configuredScanner: 'Realtime symbol status',
   strategyOutput: 'Core strategy output',
   runScan: 'Run read-only scan',
-  scanEmpty: 'Run a scan to populate market decisions.',
+  scanEmpty: 'Waiting for the next confirmed 1m candle and strategy evaluation.',
   signalHistory: 'Signal history',
   signalScore: 'Signal score',
   signalStrength: 'Signal strength',
@@ -160,8 +160,8 @@ const zh: Record<keyof typeof en, string> = {
   product: 'OKX 交易代理', localControl: '本地控制台', overview: '总览', scanner: '市场与信号', approval: '审批中心', orders: '订单生命周期', positions: '持仓', trades: '交易记录', backtest: '回测实验室', logs: '日志与审计', settings: '设置',
   overviewSubtitle: '从容掌握账户安全、运行状态与风险敞口。', scannerSubtitle: '来自确定性策略流水线的只读市场分析。', approvalSubtitle: '审核由服务端持有的交易计划，每次批准前都会重新验证。', ordersSubtitle: '与已连接后端核对的持久化执行状态。', positionsSubtitle: '钱包资产与代理管理仓位始终明确区分。', tradesSubtitle: '记录成交、费用、滑点与已实现表现。', backtestSubtitle: '在评估样本上验证 scalping_v1_baseline，不进行参数调优。', logsSubtitle: '脱敏的运行证据与不可变控制操作记录。', settingsSubtitle: '按风险级别分离运行控制，并默认留下审计记录。',
   environment: '环境', mode: '模式', execution: '执行', stream: '数据流', liveLocked: '实盘已锁定', liveDescription: '实盘执行尚未配置，此界面无法解除锁定。', localOnly: '仅限本机', authoritativeCore: '权威 Python 核心', dismiss: '关闭', writeLock: '写入保护已启用', writeLockDetail: '实时数据流当前不可用，执行授权、交易审批与自动模式均已禁用。',
-  equity: '账户权益', demoValuation: '模拟盘估值', available: '可用资金', usdtAvailable: '可用 USDT', managedSlots: '托管仓位', walletExcluded: '不计钱包自有资产', pendingPlans: '待审批计划', ttlBound: '有效期保护', tradingEligibility: '交易资格', ready: '就绪', blocked: '受阻', runtimePosture: '运行状态', independentSafety: '相互独立的安全域', agent: '代理', killSwitch: '紧急停止', accountExposure: '账户敞口', exposureSubtitle: '钱包 + 代理托管 + 预留', dataUnavailable: '暂无可用数据',
-  configuredScanner: '已配置市场扫描', strategyOutput: '核心策略输出', runScan: '运行只读扫描', scanEmpty: '运行扫描后即可查看市场决策。', signalHistory: '信号历史', signalScore: '信号评分', signalStrength: '信号强度', risk: '风险', serverPlans: '服务端交易计划', freshRevalidation: '批准前必须重新验证', noPlans: '暂无交易计划。', status: '状态', scoreStrength: '评分 / 强度', entrySize: '入场价 / 数量', reject: '拒绝', revalidateApprove: '重新验证并审批', executionRequirement: '需要新鲜数据流、运行中的代理和已授权执行。',
+  equity: '账户权益', demoValuation: '模拟盘估值', available: '可用 USDT', usdtAvailable: '可用于交易的 USDT 余额', managedSlots: '托管仓位', walletExcluded: '不计钱包自有资产', pendingPlans: '待审批计划', ttlBound: '有效期保护', tradingEligibility: '交易资格', ready: '就绪', blocked: '受阻', runtimePosture: '运行状态', independentSafety: '相互独立的安全域', agent: '代理', killSwitch: '紧急停止', accountExposure: '账户敞口', exposureSubtitle: '钱包 + 代理托管 + 预留', dataUnavailable: '暂无可用数据',
+  configuredScanner: '实时交易对状态', strategyOutput: '核心策略输出', runScan: '运行只读分析', scanEmpty: '等待下一根已确认 1m K 线与策略评估。', signalHistory: '信号历史', signalScore: '信号评分', signalStrength: '信号强度', risk: '风险', serverPlans: '服务端交易计划', freshRevalidation: '批准前必须重新验证', noPlans: '暂无交易计划。', status: '状态', scoreStrength: '评分 / 强度', entrySize: '入场价 / 数量', reject: '拒绝', revalidateApprove: '重新验证并审批', executionRequirement: '需要新鲜数据流、运行中的代理和已授权执行。',
   persistentLifecycle: '持久化订单生命周期', coreStates: '核心状态 · SQLite', noOrders: '暂无代理订单或 OKX 未成交订单。', walletManaged: '钱包与托管仓位', exposureSemantics: '风险敞口语义已分离', recordedTrades: '交易记录', records: '条记录', noRecords: '暂无记录。',
   historicalEvaluation: '历史评估', historicalSubtitle: '分页 OHLCV · 生产风控规则', symbol: '交易对', range: '时间范围', days: '天', runBacktest: '运行回测', walkForward: '滚动前向验证', result: '评估结果', noTuning: '不进行策略参数调优', evaluationEmpty: '选择时间范围后运行评估。',
   runtimeLog: '脱敏运行日志', lines: '行', noLogs: '暂无运行日志。', transitionAudit: '控制操作审计', events: '个事件', noAudit: '暂无控制操作记录。',
@@ -181,7 +181,7 @@ const codeZh: Record<string, string> = {
   DEMO: '模拟盘', LIVE: '实盘', STOPPED: '已停止', RUNNING: '运行中', PAUSED: '已暂停', FLATTENING: '平仓中', DEGRADED: '安全降级', STALE: '数据已过期',
   CONNECTED: '已连接', DISCONNECTED: '未连接', ARMED: '已授权', DISARMED: '未授权', DRY_RUN: '模拟演练',
   MANUAL_APPROVAL: '人工审批', AUTO: '自动模式', LOCKED: '已锁定', NOT_CONFIGURED: '未配置', CONFIGURED: '已配置',
-  ACTIVE: '已启用', OFF: '关闭', DISABLED: '已禁用', ENABLED: '已启用', AVAILABLE: '可用', UNAVAILABLE: '不可用', REALTIME: '实时', AGENT: 'Agent', EXTERNAL: '外部',
+  ACTIVE: '已启用', OFF: '关闭', DISABLED: '已禁用', ENABLED: '已启用', AVAILABLE: '可用', UNAVAILABLE: '不可用', REALTIME: '实时', RESYNCING: '重新同步中', WAITING: '等待评估', NOT_AVAILABLE: '暂无可用数据', NOT_RUN: '尚未执行检查', REALTIME_WS: 'OKX 实时 WebSocket', AGENT: '自动交易代理', EXTERNAL: '外部',
   READY: '就绪', NOT_READY: '未就绪', PARTIALLY_READY: '部分就绪', READ_ONLY_READY: '只读功能就绪',
   TRADE_PERMISSION_READY: '交易权限就绪', READY_FOR_CONTROLLED_DEMO_VALIDATION: '可进行受控模拟盘验证',
   READY_FOR_EXACT_APPROVAL: '可进行精确审批', PASS: '通过', FAIL: '失败', BLOCKED: '受阻', ELIGIBLE: '符合条件',
@@ -191,7 +191,7 @@ const codeZh: Record<string, string> = {
   SUBMISSION_UNKNOWN: '提交状态未知', CANCEL_REQUESTED: '已请求撤单，等待交易所确认', RECONCILIATION_REQUIRED: '需要继续核对',
   FLATTEN_INCOMPLETE: '平仓尚未完成', PROTECTION_CLEANUP_INCOMPLETE: '保护单清理尚未完成', NEW_ORDER_RECONCILING: '新订单快速核对中',
   POSITION_UNPROTECTED: '仓位未受保护', EXPIRED: '已过期', PROTECTED: '已保护',
-  BUY: '买入', LONG: '做多', HOLD: '观望', REJECT: '拒绝', BULLISH: '看涨', BEARISH: '看跌', NEUTRAL: '中性',
+  BUY: '买入', SELL: '卖出', LONG: '做多', SHORT: '做空', HOLD: '观望', REJECT: '拒绝执行', BULLISH: '看涨', BEARISH: '看跌', NEUTRAL: '中性',
   SPOT: '现货', ACTUAL: '实际值', ATTACHED_REQUESTED: '已请求附加保护单',
   DATA_UNAVAILABLE: '数据不可用', DATA_GAP: '历史数据存在缺口', DATA_INVALID: '历史数据无效', STALE_DATA: '市场数据已过期',
   EXECUTION_DISARMED: '执行尚未授权', TRADING_STOPPED: '交易已停止', KILL_SWITCH_ACTIVE: '紧急停止已启用',
@@ -200,6 +200,7 @@ const codeZh: Record<string, string> = {
   EXPOSURE_UNKNOWN: '账户风险敞口未知', ACCOUNT_DATA_UNAVAILABLE: '账户数据不可用', ACCOUNT_FUNDS_UNAVAILABLE: '账户资金数据不可用',
   COOLDOWN_ACTIVE: '交易冷却期生效中', DUPLICATE_ORDER: '检测到重复订单', SPREAD_TOO_WIDE: '买卖价差过大',
   SIGNAL_SCORE_TOO_LOW: '信号评分过低', SIGNAL_STRENGTH_TOO_LOW: '信号强度过低', SIGNAL_NO_LONGER_VALID: '交易信号已失效',
+  SIGNAL_HOLD: '策略条件不足，继续观望', RISK_REASON_UNAVAILABLE: '拒绝原因暂无可靠投影，请查看对应交易计划',
   RISK_REWARD_BELOW_MINIMUM: '风险回报比低于最低要求', INVALID_STOP_LOSS: '止损价格无效', MISSING_STOP_LOSS: '缺少止损价格',
   MISSING_TAKE_PROFIT: '缺少止盈价格', BELOW_MINIMUM_ORDER_SIZE: '低于最小下单数量', INVALID_STOP_DISTANCE: '止损距离无效',
   PLAN_EXPIRED: '交易计划已过期', PLAN_NOT_FOUND: '找不到交易计划', PLAN_NOT_PENDING: '交易计划不在待审批状态',
@@ -226,23 +227,29 @@ const codeZh: Record<string, string> = {
   CONTROL_SYNC_FAILURE_SAFE_RESET: '控制状态同步失败并安全重置', CONTROL_TRANSITION_FAILED_SAFE: '控制操作失败并保持安全状态',
   RUNTIME_FAILURE_FAIL_CLOSED: '运行故障并进入安全关闭', NEW_ENTRIES_BLOCKED_PROTECTION_PRESERVED: '阻止新开仓并保留现有保护单',
   ORDER_STATE_CHANGED: '订单状态已变更',
+  REALTIMEMARKETERROR: '实时行情错误',
+  ALL: '全部', TRADING: '交易', RISK: '风控', ORDER: '订单', RECONCILIATION: '核对', MARKET: '行情', CONTROL: '控制', ERROR: '错误',
+  'OKX PUBLIC WEBSOCKET': 'OKX 公共 WebSocket', 'CONFIRMED 1M CANDLE': '已确认的 1 分钟 K 线',
+  '1M': '1 分钟', '3M': '3 分钟', '5M': '5 分钟',
+  SERVICE_SHUTDOWN_SAFE_RESET: '服务关闭时安全重置', SET_MODE_STOPPED: '切换为停止模式', SET_MODE_DRY_RUN: '切换为模拟演练模式', STOP_AGENT: '停止交易代理',
+  SAFE_RESTART_KILL_SWITCH_PRESERVED: '安全重启并保留紧急停止状态',
   TRUE: '是', FALSE: '否', NONE: '无', NULL: '未知',
 }
 
 const fieldZh: Record<string, string> = {
   schema_version: '数据结构版本', timestamp_ms: '时间', updated_at_ms: '更新时间', created_at_ms: '创建时间', expires_at_ms: '过期时间',
   connection_freshness_age_seconds: '连接数据延迟（秒）', account_freshness_age_seconds: '账户数据延迟（秒）',
-  last_scan_at_ms: '上次市场扫描时间', last_health_at_ms: '上次系统检查时间', last_account_at_ms: '上次账户同步时间',
+  last_scan_at_ms: '最近策略评估时间', last_health_at_ms: '上次系统检查时间', last_account_at_ms: '上次账户同步时间',
   pending_plan_nearest_expiry_ms: '最近计划过期时间', consecutive_losses: '连续亏损次数',
-  environment: '环境', backend: '执行后端', runtime_mode: '核心运行模式', agent_runtime_state: '代理运行状态', trading_mode: '交易模式',
+  environment: '环境', backend: '执行后端', runtime_mode: '核心运行模式', agent_runtime_state: '代理运行状态', trading_mode: '交易模式', agent: '代理', mode: '模式', kill_switch: '紧急停止',
   execution_state: '执行授权状态', connection_state: '连接状态', live_setup_state: '实盘配置状态', setup_state: '配置状态', execution: '执行状态',
-  kill_switch_active: '紧急停止', auto_demo_enabled: '自动 Demo', scan_interval_seconds: '扫描间隔（秒）',
+  kill_switch_active: '紧急停止', auto_demo_enabled: '自动 Demo', scan_interval_seconds: '后台健康检查间隔（秒）',
   symbol: '交易对', side: '方向', decision: '决策', status: '状态', state: '订单状态', reason: '原因', rejection_reason: '拒绝原因',
   signal_score: '信号评分', signal_strength: '信号强度', strategy: '策略', entry: '计划入场价', stop: '止损价', take_profit: '止盈价',
   position_size: '仓位数量', estimated_usdt: '预计金额（USDT）', plan_id: '交易计划编号', order_id: '订单编号', okx_order_id: 'OKX 订单编号', client_order_id: '客户端订单编号',
-  requested_size: '请求数量', filled_size: '成交数量', average_fill_price: '平均成交价', submitted_at: '提交时间', filled_at: '成交时间', closed_at: '关闭时间', created_at: '创建时间', updated_at: '更新时间',
+  requested_size: '请求数量', filled_size: '成交数量', average_fill_price: '平均成交价', fill_id: '成交编号', size: '成交数量', price: '成交价格', submitted_at: '提交时间', filled_at: '成交时间', closed_at: '关闭时间', created_at: '创建时间', updated_at: '更新时间',
   entry_time: '入场时间', exit_time: '退出时间', entry_price: '入场价', exit_price: '退出价', quantity: '数量', gross_pnl: '毛损益', fees: '实际费用', fee: '费用', slippage: '滑点', slippage_abs: '滑点绝对值', slippage_pct: '滑点比例', net_pnl: '净损益', holding_time: '持仓时间',
-  equity_usdt: '账户权益（USDT）', available_usdt: '可用资金（USDT）', balances: '钱包余额', wallet_balances: '钱包余额', currency: '币种', available: '可用余额', total: '总余额',
+  equity_usdt: '账户权益（USDT）', available_usdt: '可用 USDT', balances: '钱包余额', wallet_balances: '钱包余额', currency: '币种', available: '可用余额', total: '总余额',
   exposure: '风险敞口', wallet_exposure_usdt: '钱包风险敞口（USDT）', wallet_exposure_pct: '钱包风险敞口比例', managed_exposure_usdt: '托管仓位敞口（USDT）', managed_exposure_pct: '托管仓位敞口比例', reserved_exposure_usdt: '预留敞口（USDT）', total_exposure_usdt: '总风险敞口（USDT）', total_exposure_pct: '总风险敞口比例', exposure_status: '敞口数据状态',
   managed_positions: '代理托管仓位', external_wallet_inventory: '外部钱包资产', origin: '资产来源', managed: '是否由代理管理',
   managed_open_positions: '当前托管仓位数', position_slots_in_use: '已使用托管仓位', max_open_positions: '最大托管仓位数', reserved_entry_notional: '已预留入场名义金额', open_orders: '未成交订单', okx_open_orders: 'OKX 未成交订单', agent_orders: '代理订单', agent_order_lifecycle: '代理订单生命周期', exchange_open_orders: '交易所未成交订单', account_exposure: '账户风险敞口',
@@ -267,7 +274,18 @@ export function translateCode(language: Language, value: unknown): string {
   if (typeof value === 'boolean') return language === 'zh' ? (value ? '是' : '否') : String(value)
   const raw = String(value)
   if (language !== 'zh') return raw
-  return codeZh[raw] ?? codeZh[raw.toUpperCase()] ?? raw
+  const direct = codeZh[raw] ?? codeZh[raw.toUpperCase()]
+  if (direct) return direct
+  if (/^EMA9 > EMA21 >= EMA50$/i.test(raw)) return '短期均线强于中期与长期均线（EMA9 > EMA21 ≥ EMA50）'
+  if (/^price above VWAP$/i.test(raw)) return '价格高于成交量加权平均价（VWAP）'
+  const rsi = raw.match(/^RSI reasonable \(([^)]+)\)$/i)
+  if (rsi) return `相对强弱指标处于合理区间（RSI ${rsi[1]}）`
+  if (/^MACD bullish$/i.test(raw)) return 'MACD 看涨'
+  const volume = raw.match(/^volume ratio (.+)$/i)
+  if (volume) return `成交量比率 ${volume[1]}`
+  const timeframe = raw.match(/^higher timeframes non-bearish (.+)$/i)
+  if (timeframe) return `较高周期非看跌 ${timeframe[1]}`
+  return raw
 }
 
 export function fieldLabel(language: Language, key: string): string {

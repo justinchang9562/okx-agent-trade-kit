@@ -395,6 +395,10 @@ def create_app(service: TradingService | None = None) -> FastAPI:
         async def dashboard_index() -> FileResponse:
             return FileResponse(frontend_dist / "index.html")
 
+        @app.get("/favicon.svg", include_in_schema=False)
+        async def dashboard_favicon() -> FileResponse:
+            return FileResponse(frontend_dist / "favicon.svg", media_type="image/svg+xml")
+
     else:
         @app.get("/", include_in_schema=False)
         async def dashboard_missing() -> JSONResponse:

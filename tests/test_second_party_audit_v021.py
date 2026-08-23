@@ -378,4 +378,4 @@ def test_mcp_tool_error_does_not_echo_sensitive_stderr_or_payload() -> None:
 
 
 def test_component_version_tracks_remediation_release() -> None:
-    assert __version__ == "0.4.1"
+    assert __version__ == "0.4.2"

@@ -384,6 +384,15 @@ class TradingService:
 
     def session_status(self) -> dict[str, Any]:
         status = self._session.status()
+        if status["session_state"] == SessionState.DEGRADED.value:
+            degraded = next(
+                (
+                    item for item in self._control.list_audit(20)
+                    if item.get("requested_action") == "SESSION_FAIL_CLOSED"
+                ),
+                None,
+            )
+            status["degraded_reason"] = degraded.get("reason") if degraded else None
         status["market"] = self._last_market
         status["account_freshness_age_seconds"] = (
             (now_ms() - self._last_account_at_ms) / 1000 if self._last_account_at_ms else None
@@ -810,6 +819,20 @@ class TradingService:
             "runtime": {
                 "scan_interval_seconds": self._control.get().scan_interval_seconds,
                 "auto_demo_default": False,
+            },
+            "runtime_display": {
+                "realtime_market_enabled": bool(
+                    self.config.rules.get("realtime", {}).get("enabled", False)
+                ),
+                "market_source": "OKX Public WebSocket",
+                "strategy_trigger": "Confirmed 1m Candle",
+                "confirmations": list(
+                    self.config.rules.get("timeframes", {}).get("confirmation", [])
+                ),
+                "account_sync_interval_seconds": self.config.rules.get(
+                    "runtime", {}
+                ).get("account_sync_interval_seconds"),
+                "targeted_reconciliation": "ENABLED",
             },
             "risk": dict(self.config.rules["risk"]),
             "scalping": dict(self.config.rules["scalping"]),

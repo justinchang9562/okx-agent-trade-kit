@@ -1,4 +1,4 @@
-# OKX Operator-Controlled Automatic Trading Agent v0.4.1
+# OKX Operator-Controlled Automatic Trading Agent v0.4.2
 
 这是一个运行在本机、连接 **OKX Demo** 的自动现货交易 Agent。普通用户只需要四个操作：
 

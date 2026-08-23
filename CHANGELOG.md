@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.2 - 2026-08-23
+
+- Consolidated Dashboard UX around session-level START, PAUSE, STOP, and FLATTEN controls.
+- Added dedicated realtime market, signal history, approval, lifecycle, position, trade, and runtime views.
+- Unified timestamp, price, quantity, USDT, percent, PnL, duration, optional-value, and identifier formatting.
+- Added read-only managed-exposure, protection, display-dust, realtime runtime, and degraded-reason projections.
+- Preserved the five top safety chips, Approval Center primary navigation, spacious visual layout, Demo-only MCP path, and frozen v0.4.1 trading core.
+
 ## 0.4.1 - 2026-08-23
 
 - Made cancel acknowledgement nonterminal with persistent `CANCEL_REQUESTED` and bounded targeted

@@ -61,6 +61,7 @@ def test_account_projection_separates_agent_and_external_ownership(
     assert [item["origin"] for item in projection["fills"]] == ["AGENT", "EXTERNAL"]
     assert projection["positions"]["external_wallet_inventory"] == [{
         "currency": "BTC", "quantity": 1.0, "origin": "EXTERNAL", "managed": False,
+        "display_dust": False,
     }]
 
 
@@ -75,6 +76,13 @@ def test_cash_only_projection_is_known_without_market_data(tmp_path, market, acc
     assert exposure["managed_exposure_usdt"] == 0.0
     assert exposure["total_exposure_pct"] == 0.0
     assert projection["positions"]["account_exposure"] == exposure
+    assert projection["positions"]["exposure_summary"] == {
+        "managed_exposure_usdt": 0.0,
+        "managed_exposure_pct": 0.0,
+        "protected_positions": 0,
+        "total_managed_positions": 0,
+        "critical": False,
+    }
 
 
 def test_non_cash_projection_remains_unavailable_without_market_data(
@@ -90,3 +98,25 @@ def test_non_cash_projection_remains_unavailable_without_market_data(
 
     assert projection["account"]["exposure"] == "DATA_UNAVAILABLE"
     assert projection["positions"]["account_exposure"] == "DATA_UNAVAILABLE"
+    assert projection["positions"]["exposure_summary"]["managed_exposure_usdt"] == 0.0
+    assert projection["positions"]["exposure_summary"]["managed_exposure_pct"] == 0.0
+
+
+def test_external_inventory_marks_presentation_dust_without_removing_risk_data(
+    tmp_path, market, account,
+) -> None:
+    dusty = replace(
+        account,
+        balances=(
+            Balance("USDT", 5_000, 5_000),
+            Balance("BTC", 2.35e-9, 2.35e-9),
+            Balance("OKB", 4.63e-7, 4.63e-7),
+        ),
+    )
+    with agent(tmp_path, market, dusty) as orchestrator:
+        orchestrator.set_market_provider(UnavailableMarketProvider())
+        projection = orchestrator.synchronize_account()
+
+    inventory = projection["positions"]["external_wallet_inventory"]
+    assert [item["display_dust"] for item in inventory] == [True, True]
+    assert projection["account"]["exposure"] == "DATA_UNAVAILABLE"

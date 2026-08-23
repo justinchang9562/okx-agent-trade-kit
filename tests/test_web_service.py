@@ -164,6 +164,10 @@ def test_local_api_requires_session_and_csrf_and_keeps_live_locked(tmp_path, mar
             root = client.get("/")
             assert root.status_code == 200
             assert "text/html" in root.headers["content-type"] or root.json()["status"] == "FRONTEND_NOT_BUILT"
+            if "text/html" in root.headers["content-type"]:
+                favicon = client.get("/favicon.svg")
+                assert favicon.status_code == 200
+                assert "image/svg+xml" in favicon.headers["content-type"]
             assert "default-src 'self'" in root.headers["content-security-policy"]
             assert client.get("/api/v1/status", headers={"host": "attacker.invalid"}).status_code == 400
     finally:
