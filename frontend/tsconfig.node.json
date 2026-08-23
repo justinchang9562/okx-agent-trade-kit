@@ -4,6 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "allowImportingTsExtensions": true,
+    "types": [],
     "noEmit": true
   },
   "include": ["vite.config.ts"]

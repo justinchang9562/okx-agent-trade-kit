@@ -8,6 +8,11 @@ from tests.test_approval_revalidation import AccountService, agent
 from tests.test_core_hardening import plan_for
 
 
+class UnavailableMarketProvider:
+    def get_snapshot(self, symbol: str):
+        raise RuntimeError(f"REALTIME_MARKET_UNAVAILABLE:{symbol}")
+
+
 def test_account_projection_separates_agent_and_external_ownership(
     tmp_path, market, account, long_signal,
 ) -> None:
@@ -57,3 +62,31 @@ def test_account_projection_separates_agent_and_external_ownership(
     assert projection["positions"]["external_wallet_inventory"] == [{
         "currency": "BTC", "quantity": 1.0, "origin": "EXTERNAL", "managed": False,
     }]
+
+
+def test_cash_only_projection_is_known_without_market_data(tmp_path, market, account) -> None:
+    with agent(tmp_path, market, account) as orchestrator:
+        orchestrator.set_market_provider(UnavailableMarketProvider())
+        projection = orchestrator.synchronize_account()
+
+    exposure = projection["account"]["exposure"]
+    assert exposure["status"] == "KNOWN"
+    assert exposure["wallet_exposure_usdt"] == 0.0
+    assert exposure["managed_exposure_usdt"] == 0.0
+    assert exposure["total_exposure_pct"] == 0.0
+    assert projection["positions"]["account_exposure"] == exposure
+
+
+def test_non_cash_projection_remains_unavailable_without_market_data(
+    tmp_path, market, account,
+) -> None:
+    risky_account = replace(
+        account,
+        balances=(Balance("USDT", 5_000, 5_000), Balance("BTC", 1.0, 1.0)),
+    )
+    with agent(tmp_path, market, risky_account) as orchestrator:
+        orchestrator.set_market_provider(UnavailableMarketProvider())
+        projection = orchestrator.synchronize_account()
+
+    assert projection["account"]["exposure"] == "DATA_UNAVAILABLE"
+    assert projection["positions"]["account_exposure"] == "DATA_UNAVAILABLE"

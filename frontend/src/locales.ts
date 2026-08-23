@@ -231,6 +231,9 @@ const codeZh: Record<string, string> = {
 
 const fieldZh: Record<string, string> = {
   schema_version: '数据结构版本', timestamp_ms: '时间', updated_at_ms: '更新时间', created_at_ms: '创建时间', expires_at_ms: '过期时间',
+  connection_freshness_age_seconds: '连接数据延迟（秒）', account_freshness_age_seconds: '账户数据延迟（秒）',
+  last_scan_at_ms: '上次市场扫描时间', last_health_at_ms: '上次系统检查时间', last_account_at_ms: '上次账户同步时间',
+  pending_plan_nearest_expiry_ms: '最近计划过期时间', consecutive_losses: '连续亏损次数',
   environment: '环境', backend: '执行后端', runtime_mode: '核心运行模式', agent_runtime_state: '代理运行状态', trading_mode: '交易模式',
   execution_state: '执行授权状态', connection_state: '连接状态', live_setup_state: '实盘配置状态', setup_state: '配置状态', execution: '执行状态',
   kill_switch_active: '紧急停止', auto_demo_enabled: '自动 Demo', scan_interval_seconds: '扫描间隔（秒）',
@@ -241,7 +244,8 @@ const fieldZh: Record<string, string> = {
   entry_time: '入场时间', exit_time: '退出时间', entry_price: '入场价', exit_price: '退出价', quantity: '数量', gross_pnl: '毛损益', fees: '实际费用', fee: '费用', slippage: '滑点', slippage_abs: '滑点绝对值', slippage_pct: '滑点比例', net_pnl: '净损益', holding_time: '持仓时间',
   equity_usdt: '账户权益（USDT）', available_usdt: '可用资金（USDT）', balances: '钱包余额', wallet_balances: '钱包余额', currency: '币种', available: '可用余额', total: '总余额',
   exposure: '风险敞口', wallet_exposure_usdt: '钱包风险敞口（USDT）', wallet_exposure_pct: '钱包风险敞口比例', managed_exposure_usdt: '托管仓位敞口（USDT）', managed_exposure_pct: '托管仓位敞口比例', reserved_exposure_usdt: '预留敞口（USDT）', total_exposure_usdt: '总风险敞口（USDT）', total_exposure_pct: '总风险敞口比例', exposure_status: '敞口数据状态',
-  managed_positions: '代理托管仓位', managed_open_positions: '当前托管仓位数', position_slots_in_use: '已使用托管仓位', max_open_positions: '最大托管仓位数', reserved_entry_notional: '已预留入场名义金额', open_orders: '未成交订单', okx_open_orders: 'OKX 未成交订单', agent_orders: '代理订单', agent_order_lifecycle: '代理订单生命周期', exchange_open_orders: '交易所未成交订单', account_exposure: '账户风险敞口',
+  managed_positions: '代理托管仓位', external_wallet_inventory: '外部钱包资产', origin: '资产来源', managed: '是否由代理管理',
+  managed_open_positions: '当前托管仓位数', position_slots_in_use: '已使用托管仓位', max_open_positions: '最大托管仓位数', reserved_entry_notional: '已预留入场名义金额', open_orders: '未成交订单', okx_open_orders: 'OKX 未成交订单', agent_orders: '代理订单', agent_order_lifecycle: '代理订单生命周期', exchange_open_orders: '交易所未成交订单', account_exposure: '账户风险敞口',
   projected_total_exposure_usdt: '预计总风险敞口（USDT）', priced_currencies: '已计价币种', unpriced_currencies: '未计价币种', ignored_dust_currencies: '已忽略微量币种',
   daily_pnl: '当日损益', open_order_count: '未成交订单数', fill_count: '成交记录数', equity: '权益',
   risk: '风控设置', max_position_pct: '单仓最大比例', max_total_exposure_pct: '总敞口上限', max_daily_loss_pct: '每日最大亏损比例', max_consecutive_losses: '最大连续亏损次数', max_spread_pct: '最大买卖价差', max_entry_deviation_pct: '最大入场偏差', trade_plan_ttl_seconds: '交易计划有效期（秒）',

@@ -142,6 +142,27 @@ class TradingOrchestrator:
             dust_quantity=float(self.config.rules["risk"].get("unpriced_asset_dust_quantity", 0.0)),
         )
 
+    def _dashboard_exposure(self, account: AccountSnapshot) -> ExposureSnapshot:
+        """Build a read-only exposure projection without market data when cash-only is provable."""
+        stable = {"USDT", "USDC", "USD"}
+        has_risky_wallet_inventory = any(
+            balance.currency not in stable and balance.equity > 0
+            for balance in account.balances
+        )
+        managed = self.trade_store.managed_positions()
+        if not has_risky_wallet_inventory and not managed:
+            return build_exposure_snapshot(
+                account=account,
+                prices={},
+                managed_notional_usdt=0.0,
+                reserved_notional_usdt=self.trade_store.reserved_entry_notional(),
+                dust_quantity=float(
+                    self.config.rules["risk"].get("unpriced_asset_dust_quantity", 0.0)
+                ),
+            )
+        market = self._market_snapshot(self.config.symbols[0])
+        return self._exposure(account, market)
+
     def _risk_and_sizing(
         self, market: MarketSnapshot, account: AccountSnapshot, duplicate: bool = False
     ) -> tuple[Any, RiskDecision, SizingResult, ExposureSnapshot]:
@@ -353,8 +374,7 @@ class TradingOrchestrator:
     def positions(self) -> dict[str, Any]:
         account = self.account_data.get_snapshot()
         try:
-            reference_market = self._market_snapshot(self.config.symbols[0])
-            exposure: dict[str, Any] | str = asdict(self._exposure(account, reference_market))
+            exposure: dict[str, Any] | str = asdict(self._dashboard_exposure(account))
         except Exception:
             exposure = "DATA_UNAVAILABLE"
         return {
@@ -385,8 +405,7 @@ class TradingOrchestrator:
     def account(self) -> dict[str, Any]:
         account = self.account_data.get_snapshot()
         try:
-            market = self._market_snapshot(self.config.symbols[0])
-            exposure: dict[str, Any] | str = asdict(self._exposure(account, market))
+            exposure: dict[str, Any] | str = asdict(self._dashboard_exposure(account))
         except Exception:
             exposure = "DATA_UNAVAILABLE"
         return {
@@ -438,8 +457,7 @@ class TradingOrchestrator:
                     "managed": False,
                 })
         try:
-            market = self._market_snapshot(self.config.symbols[0])
-            exposure: dict[str, Any] | str = asdict(self._exposure(account, market))
+            exposure: dict[str, Any] | str = asdict(self._dashboard_exposure(account))
         except Exception:
             exposure = "DATA_UNAVAILABLE"
         return {
