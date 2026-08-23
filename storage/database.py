@@ -4,7 +4,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 7
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -85,6 +85,18 @@ CREATE TABLE IF NOT EXISTS flatten_intents (
   FOREIGN KEY(plan_id) REFERENCES managed_positions(plan_id)
 );
 CREATE INDEX IF NOT EXISTS idx_flatten_intents_state ON flatten_intents(state);
+CREATE TABLE IF NOT EXISTS flatten_attempts (
+  plan_id TEXT NOT NULL, attempt_number INTEGER NOT NULL,
+  client_order_id TEXT NOT NULL UNIQUE, symbol TEXT NOT NULL,
+  requested_quantity REAL NOT NULL, filled_quantity REAL NOT NULL DEFAULT 0,
+  order_id TEXT, state TEXT NOT NULL, terminal_confirmed INTEGER NOT NULL DEFAULT 0,
+  reconciliation_complete INTEGER NOT NULL DEFAULT 0,
+  created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+  raw_response_json TEXT, last_error TEXT, protection_cleanup_json TEXT,
+  PRIMARY KEY(plan_id, attempt_number),
+  FOREIGN KEY(plan_id) REFERENCES managed_positions(plan_id)
+);
+CREATE INDEX IF NOT EXISTS idx_flatten_attempts_state ON flatten_attempts(state);
 CREATE TABLE IF NOT EXISTS reconciliation_cursors (
   symbol TEXT NOT NULL, stream_kind TEXT NOT NULL,
   last_timestamp_ms INTEGER, last_fill_id TEXT, updated_at_ms INTEGER NOT NULL,
@@ -142,6 +154,7 @@ def _migrate(connection: sqlite3.Connection) -> None:
         "exit_filled_quantity REAL NOT NULL DEFAULT 0", "exit_fee_breakdown_json TEXT",
     ):
         _ensure_column(connection, "managed_positions", definition)
+    _ensure_column(connection, "flatten_attempts", "protection_cleanup_json TEXT")
     connection.execute("UPDATE signals SET signal_strength = confidence WHERE signal_strength IS NULL")
     connection.execute(
         "UPDATE trades SET fee_status = CASE WHEN fees IS NULL THEN 'UNKNOWN' ELSE 'LEGACY_ESTIMATE' END "
@@ -149,6 +162,18 @@ def _migrate(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_plan_id ON trades(plan_id) WHERE plan_id IS NOT NULL"
+    )
+    connection.execute(
+        """INSERT OR IGNORE INTO flatten_attempts
+           (plan_id, attempt_number, client_order_id, symbol, requested_quantity,
+            filled_quantity, order_id, state, terminal_confirmed, reconciliation_complete,
+            created_at_ms, updated_at_ms, raw_response_json, last_error)
+           SELECT plan_id, 1, client_order_id, symbol, requested_quantity, filled_quantity,
+                  order_id, state,
+                  CASE WHEN state IN ('FILLED', 'CANCELLED', 'REJECTED') THEN 1 ELSE 0 END,
+                  CASE WHEN state IN ('FILLED', 'CANCELLED', 'REJECTED') THEN 1 ELSE 0 END,
+                  created_at_ms, updated_at_ms, raw_response_json, last_error
+             FROM flatten_intents"""
     )
     applied_at_ms = int(datetime.now(UTC).timestamp() * 1000)
     for version in range(1, LATEST_SCHEMA_VERSION + 1):

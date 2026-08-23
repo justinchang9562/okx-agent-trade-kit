@@ -23,12 +23,14 @@ class RealtimeMarketState:
         minimum_candles: int = 50,
         stale_after_seconds: float = 5.0,
         capacity: int = 500,
+        sequence_regression_resync_threshold: int = 1_000,
         clock_ms: Callable[[], int] | None = None,
     ) -> None:
         self.symbols = tuple(item.upper() for item in symbols)
         self.minimum_candles = minimum_candles
         self.stale_after_ms = int(stale_after_seconds * 1000)
         self.clock_ms = clock_ms or (lambda: int(time.time() * 1000))
+        self.sequence_regression_resync_threshold = sequence_regression_resync_threshold
         self.metrics = RealtimeMetrics()
         self._states = {symbol: SymbolMarketState(symbol) for symbol in self.symbols}
         self._buffers = {
@@ -219,6 +221,13 @@ class RealtimeMarketState:
             if state.last_book_sequence is not None and sequence < state.last_book_sequence:
                 state.out_of_order_messages += 1
                 self.metrics.increment("out_of_order_events")
+                if state.last_book_sequence - sequence >= self.sequence_regression_resync_threshold:
+                    state.stream_state = MarketStreamState.RESYNCING
+                    state.public_connected = False
+                    state.last_book_sequence = None
+                    state.last_book_timestamp_ms = None
+                    state.validation_error = "BOOK_SEQUENCE_REGRESSION"
+                    raise RealtimeMarketError("BOOK_SEQUENCE_REGRESSION_RESYNC_REQUIRED")
                 return
             if state.last_book_sequence == sequence and state.bid == bid and state.ask == ask:
                 state.duplicate_messages_dropped += 1

@@ -83,9 +83,27 @@ def test_confirmed_one_minute_candle_emits_once_and_drops_duplicate() -> None:
     assert metrics["confirmed_candle_timestamp"] == NOW_MS
 
 
-def test_disconnect_and_stale_market_fail_closed_for_new_entries() -> None:
+def test_reconnect_bootstrap_overlap_does_not_emit_old_confirmed_candle() -> None:
     state = ready_state()
-    state.mark_disconnected("public")
+    existing = candles("1m")[-1]
+    events = state.apply_message(
+        {
+            "arg": {"channel": "candle1m", "instId": SYMBOL},
+            "data": [[
+                str(existing.timestamp_ms), str(existing.open), str(existing.high),
+                str(existing.low), str(existing.close), str(existing.volume), "0",
+                str(existing.quote_volume), "1",
+            ]],
+        },
+        NOW_MS,
+    )
+    assert events == []
+
+
+@pytest.mark.parametrize("endpoint", ["public", "business"])
+def test_disconnect_and_stale_market_fail_closed_for_new_entries(endpoint) -> None:
+    state = ready_state()
+    state.mark_disconnected(endpoint)
     with pytest.raises(PermissionError, match="MARKET_STREAM_DISCONNECTED"):
         state.assert_entry_ready(SYMBOL)
 
@@ -163,3 +181,32 @@ def test_future_dated_market_payload_is_rejected() -> None:
             },
             NOW_MS,
         )
+
+
+def test_large_book_sequence_regression_forces_resync() -> None:
+    state = ready_state()
+    state.apply_message(
+        {
+            "arg": {"channel": "books5", "instId": SYMBOL},
+            "data": [{
+                "ts": str(NOW_MS), "seqId": 5_000,
+                "bids": [["99.8", "1", "0", "1"]],
+                "asks": [["100.2", "1", "0", "1"]],
+            }],
+        },
+        NOW_MS,
+    )
+    with pytest.raises(RealtimeMarketError, match="BOOK_SEQUENCE_REGRESSION"):
+        state.apply_message(
+            {
+                "arg": {"channel": "books5", "instId": SYMBOL},
+                "data": [{
+                    "ts": str(NOW_MS), "seqId": 1,
+                    "bids": [["99.9", "1", "0", "1"]],
+                    "asks": [["100.1", "1", "0", "1"]],
+                }],
+            },
+            NOW_MS,
+        )
+    with pytest.raises(PermissionError, match="MARKET_STREAM_(RESYNCING|STALE)"):
+        state.assert_entry_ready(SYMBOL)

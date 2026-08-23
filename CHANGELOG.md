@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1 - 2026-08-23
+
+- Made cancel acknowledgement nonterminal with persistent `CANCEL_REQUESTED` and bounded targeted
+  reconciliation for cancel/fill races.
+- Added a newly submitted order fast lane that immediately reconciles fill and strict protection
+  state without weakening `SUBMISSION_UNKNOWN` or duplicate guards.
+- Replaced the single flatten intent with ordered persistent attempts whose quantities derive only
+  from deduplicated confirmed exit fills; protection cleanup is retried separately after closure.
+- Hardened books5 sequence-reset recovery, interleaved WebSocket heartbeat handling, confirmed-candle
+  queue backpressure, stale strategy-event rejection, and AccountSynchronizer shutdown behavior.
+
 ## 0.4.0 - 2026-08-23
 
 Final product consolidation into an operator-controlled automatic Demo trading agent.

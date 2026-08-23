@@ -1,4 +1,4 @@
-# OKX Operator-Controlled Automatic Trading Agent v0.4.0
+# OKX Operator-Controlled Automatic Trading Agent v0.4.1
 
 这是一个运行在本机、连接 **OKX Demo** 的自动现货交易 Agent。普通用户只需要四个操作：
 
@@ -70,6 +70,14 @@ diagnostics 和 research，不会改成高频 full polling。
     Trading Agent -> OrderManager -> OKX Agent Trade Kit MCP -> OKX Demo
 
 项目没有重新实现 OKX private REST authentication 或原生交易栈。
+
+新提交订单和撤单请求不等待普通 3 秒同步。它们使用单订单 scoped 的 bounded fast lane：
+`immediate → 300ms → 1s → 2s`。撤单 ACK 只进入 `CANCEL_REQUESTED`；只有远端明确返回
+cancelled 才进入 `CANCELLED`，若 race 中成交则建立托管仓位并立即复核 SL/TP。
+
+Flatten 使用持久化有序 attempts。上一 attempt 只有在远端终态和成交事实都确认后，才允许用
+新的 deterministic client ID 对剩余托管数量继续平仓。剩余数量始终来自去重后的持久化退出
+成交；仓位完全关闭前不清理保护单。
 
 ## Safety Core
 

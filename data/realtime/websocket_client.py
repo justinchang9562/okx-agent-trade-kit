@@ -98,18 +98,24 @@ class OKXPublicWebSocketClient:
     ) -> None:
         connector = self.connect_factory(endpoint)
         async with connector as websocket:
-            await websocket.send(json.dumps(subscribe_payload(arguments, f"v040-{kind}")))
+            await websocket.send(json.dumps(subscribe_payload(arguments, f"v041-{kind}")))
             pending_acks = {(item["channel"], item["instId"]) for item in arguments}
+            pong_deadline: float | None = None
+            loop = asyncio.get_running_loop()
             while not self._stop.is_set():
+                timeout = self.heartbeat_seconds
+                if pong_deadline is not None:
+                    timeout = max(0.0, pong_deadline - loop.time())
                 try:
-                    raw = await asyncio.wait_for(websocket.recv(), timeout=self.heartbeat_seconds)
+                    raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
                 except TimeoutError:
-                    await websocket.send("ping")
-                    raw = await asyncio.wait_for(websocket.recv(), timeout=self.pong_timeout_seconds)
-                    if raw != "pong":
+                    if pong_deadline is not None:
                         raise ConnectionError("OKX_WEBSOCKET_PONG_TIMEOUT")
+                    await websocket.send("ping")
+                    pong_deadline = loop.time() + self.pong_timeout_seconds
                     continue
                 if raw == "pong":
+                    pong_deadline = None
                     continue
                 if not isinstance(raw, str):
                     raise ValueError("OKX_WEBSOCKET_NON_TEXT_MESSAGE")

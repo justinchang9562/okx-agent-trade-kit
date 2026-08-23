@@ -34,6 +34,8 @@ status.control includes:
 | session_state | STOPPED, RUNNING, PAUSED, FLATTENING, DEGRADED |
 | environment | DEMO; LIVE requests fail LIVE_NOT_CONFIGURED |
 | execution_state | DISARMED, ARMED; internal safety state |
+| order lifecycle | includes nonterminal `CANCEL_REQUESTED` and `SUBMISSION_UNKNOWN` |
+| flatten lifecycle | may expose `FLATTEN_INCOMPLETE` or `PROTECTION_CLEANUP_INCOMPLETE` |
 | agent_runtime_state | STOPPED, RUNNING, DEGRADED, STALE; internal |
 | trading_mode | compatibility/internal; main UI never selects it |
 | connection_state | CONNECTED, STALE, DISCONNECTED |

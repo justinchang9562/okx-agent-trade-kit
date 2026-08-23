@@ -6,6 +6,7 @@ class OrderState(str, Enum):
     APPROVED = "APPROVED"
     SUBMITTED = "SUBMITTED"
     SUBMISSION_UNKNOWN = "SUBMISSION_UNKNOWN"
+    CANCEL_REQUESTED = "CANCEL_REQUESTED"
     OPEN = "OPEN"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     FILLED = "FILLED"
@@ -20,6 +21,7 @@ ACTIVE_ORDER_STATES = {
     OrderState.APPROVED.value,
     OrderState.SUBMITTED.value,
     OrderState.SUBMISSION_UNKNOWN.value,
+    OrderState.CANCEL_REQUESTED.value,
     OrderState.OPEN.value,
     OrderState.PARTIALLY_FILLED.value,
     OrderState.FILLED.value,
@@ -38,20 +40,27 @@ ALLOWED_TRANSITIONS = {
     OrderState.SUBMITTED.value: {
         OrderState.SUBMITTED.value, OrderState.SUBMISSION_UNKNOWN.value, OrderState.OPEN.value,
         OrderState.PARTIALLY_FILLED.value, OrderState.FILLED.value, OrderState.REJECTED.value,
-        OrderState.CANCELLED.value,
+        OrderState.CANCEL_REQUESTED.value, OrderState.CANCELLED.value,
     },
     OrderState.SUBMISSION_UNKNOWN.value: {
         OrderState.SUBMISSION_UNKNOWN.value, OrderState.SUBMITTED.value, OrderState.OPEN.value,
         OrderState.PARTIALLY_FILLED.value, OrderState.FILLED.value, OrderState.REJECTED.value,
-        OrderState.CANCELLED.value,
+        OrderState.CANCEL_REQUESTED.value, OrderState.CANCELLED.value,
     },
     OrderState.OPEN.value: {
         OrderState.OPEN.value, OrderState.PARTIALLY_FILLED.value, OrderState.FILLED.value,
-        OrderState.CANCELLED.value, OrderState.REJECTED.value,
+        OrderState.CANCEL_REQUESTED.value, OrderState.CANCELLED.value, OrderState.REJECTED.value,
     },
     OrderState.PARTIALLY_FILLED.value: {
         OrderState.PARTIALLY_FILLED.value, OrderState.FILLED.value,
-        OrderState.CANCELLED.value, OrderState.POSITION_UNPROTECTED.value,
+        OrderState.CANCEL_REQUESTED.value, OrderState.CANCELLED.value,
+        OrderState.POSITION_UNPROTECTED.value,
+    },
+    OrderState.CANCEL_REQUESTED.value: {
+        OrderState.CANCEL_REQUESTED.value, OrderState.SUBMITTED.value, OrderState.OPEN.value,
+        OrderState.PARTIALLY_FILLED.value, OrderState.FILLED.value,
+        OrderState.POSITION_UNPROTECTED.value, OrderState.CANCELLED.value,
+        OrderState.REJECTED.value,
     },
     OrderState.FILLED.value: {
         OrderState.FILLED.value, OrderState.POSITION_UNPROTECTED.value, OrderState.CLOSED.value,

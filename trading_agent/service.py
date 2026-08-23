@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import re
 import threading
 import time
@@ -95,9 +96,22 @@ class TradingService:
         self._orchestrator = orchestrator or TradingOrchestrator(config)
         self._api = LocalControlAPI(self._orchestrator)
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="trading-core")
-        self._event_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="market-events")
+        queue_capacity = int(config.rules.get("realtime", {}).get("event_queue_capacity", 16))
+        self._market_event_queue: queue.Queue[ConfirmedCandleEvent] = queue.Queue(
+            maxsize=max(1, queue_capacity),
+        )
+        self._market_event_stop = threading.Event()
+        self._market_event_lock = threading.RLock()
+        self._market_event_keys: deque[tuple[str, str, int]] = deque(maxlen=256)
+        self._market_event_key_set: set[tuple[str, str, int]] = set()
+        self._event_worker = threading.Thread(
+            target=self._market_event_loop, name="market-events", daemon=True,
+        )
+        self._event_worker.start()
         self._backtests = backtest_service or BacktestService(config)
-        self._account_sync = AccountSynchronizer()
+        self._account_sync = AccountSynchronizer(float(
+            config.rules.get("runtime", {}).get("account_sync_interval_seconds", 3),
+        ))
         self._control = ControlStore(config.root / "trading_agent.db")
         self._events: deque[dict[str, Any]] = deque(maxlen=500)
         self._event_lock = threading.RLock()
@@ -327,6 +341,8 @@ class TradingService:
             orders = self._run_core(self._orchestrator.trade_store.get_orders)
             if any(item.get("state") == "SUBMISSION_UNKNOWN" for item in orders):
                 blockers.append("SUBMISSION_UNKNOWN_REQUIRES_RECONCILIATION")
+            if any(item.get("state") == "CANCEL_REQUESTED" for item in orders):
+                blockers.append("CANCEL_REQUEST_REQUIRES_RECONCILIATION")
             positions = self._run_core(self._orchestrator.trade_store.managed_positions)
             if any(item.protection_state != "PROTECTED" for item in positions):
                 blockers.append("POSITION_UNPROTECTED")
@@ -377,14 +393,58 @@ class TradingService:
     def _on_confirmed_candle(self, event: ConfirmedCandleEvent) -> None:
         if self._closed:
             return
+        key = (event.symbol, event.timeframe, event.candle_timestamp_ms)
+        with self._market_event_lock:
+            if key in self._market_event_key_set:
+                return
+            if len(self._market_event_keys) == self._market_event_keys.maxlen:
+                self._market_event_key_set.discard(self._market_event_keys[0])
+            self._market_event_keys.append(key)
+            self._market_event_key_set.add(key)
         try:
-            self._event_worker.submit(self._handle_confirmed_candle, event)
-        except RuntimeError:
+            self._market_event_queue.put_nowait(event)
+        except queue.Full:
+            with self._market_event_lock:
+                self._market_event_key_set.discard(key)
+                if self._market_event_keys and self._market_event_keys[-1] == key:
+                    self._market_event_keys.pop()
+            if self._realtime is not None:
+                self._realtime.state.metrics.increment("critical_queue_overflows")
+            self._session.degrade("MARKET_EVENT_BACKLOG_OVERFLOW")
+            self._emit(
+                "strategy.event_dropped",
+                {"symbol": event.symbol, "candle_timestamp_ms": event.candle_timestamp_ms},
+                "MARKET_EVENT_BACKLOG_OVERFLOW",
+            )
             return
+
+    def _market_event_loop(self) -> None:
+        while not self._market_event_stop.is_set():
+            try:
+                event = self._market_event_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            try:
+                self._handle_confirmed_candle(event)
+            finally:
+                self._market_event_queue.task_done()
 
     def _handle_confirmed_candle(self, event: ConfirmedCandleEvent) -> None:
         control = self._control.get()
         if event.timeframe != "1m" or control.session_state is not SessionState.RUNNING:
+            return
+        max_age_ms = int(
+            float(self.config.rules.get("realtime", {}).get("strategy_event_max_age_seconds", 5))
+            * 1000
+        )
+        if now_ms() - event.received_timestamp_ms > max_age_ms:
+            if self._realtime is not None:
+                self._realtime.state.metrics.increment("stale_strategy_events")
+            self._emit(
+                "strategy.event_dropped",
+                {"symbol": event.symbol, "candle_timestamp_ms": event.candle_timestamp_ms},
+                "STALE_STRATEGY_EVENT",
+            )
             return
         started = now_ms()
         created = False
@@ -916,7 +976,9 @@ class TradingService:
             self._scheduler.join(timeout=5)
         if self._realtime is not None:
             self._realtime.close()
-        self._event_worker.shutdown(wait=True, cancel_futures=True)
+        self._account_sync.close()
+        self._market_event_stop.set()
+        self._event_worker.join(timeout=5)
         try:
             self._run_core(self._orchestrator.state.disarm_execution)
             self._control.transition(

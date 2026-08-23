@@ -125,10 +125,33 @@ account.updated, orders.updated, positions.updated and fills.updated only when p
 The default interval is three seconds and overlapping polling is impossible because all Core/MCP
 access is serialized.
 
+## Order lifecycle fast lane
+
+Normal account projection remains a three-second single-flight loop. A newly submitted order or an
+accepted cancel request additionally receives four bounded, serialized, single-order lookups at
+`0s`, `0.3s`, `1s` and `2s`. This is not a permanent poller.
+
+Cancel acknowledgement is nonterminal: `OPEN/PARTIALLY_FILLED → CANCEL_REQUESTED`. Targeted
+reconciliation alone may promote it to `CANCELLED`, `FILLED`, or an updated partial managed
+position. `SUBMISSION_UNKNOWN` continues to use client-order lookup first and never resubmits.
+
+Flatten is an ordered attempt ledger. Each terminal, fully reconciled failed/cancelled attempt may
+produce one new deterministic client ID for the remaining quantity computed from deduplicated,
+persisted exit fills. Active or uncertain attempts forbid another close. Protection cleanup starts
+only after the managed position and trade are durably closed; failures persist as
+`PROTECTION_CLEANUP_INCOMPLETE` for background retry.
+
+## Realtime transport hardening
+
+A large books5 sequence regression moves the symbol to `RESYNCING` and fails the endpoint so both
+feeds reconnect and bootstrap before entries resume. Heartbeat processing accepts ticker/book/candle
+messages while awaiting pong. Confirmed-candle work uses a bounded deduplicating queue; overflow
+degrades the session and events older than five seconds are discarded as `STALE_STRATEGY_EVENT`.
+
 ## Durable safety core
 
 SQLite persists TradePlan -> OrderLifecycle -> ManagedPosition -> Trade plus reconciliation cursors,
-fill evidence, control audit and flatten intents. WAL, FULL synchronous mode, bounded busy timeout,
+fill evidence, control audit and ordered flatten attempts. WAL, FULL synchronous mode, bounded busy timeout,
 CAS lifecycle transitions and per-store reentrant locks remain.
 
 Backtests use an independent read-only backend and worker and cannot call OrderManager. Live remains

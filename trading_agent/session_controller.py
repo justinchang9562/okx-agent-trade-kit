@@ -104,8 +104,12 @@ class AutoTradingSessionController:
         active_entries = self.service._run_core(
             self.service._orchestrator.trade_store.active_orders
         )
+        active_flatten_attempts = self.service._run_core(
+            self.service._orchestrator.trade_store.flatten_intents, True,
+        )
         unresolved_states = {
-            "APPROVED", "SUBMITTED", "SUBMISSION_UNKNOWN", "OPEN", "PARTIALLY_FILLED",
+            "APPROVED", "SUBMITTED", "SUBMISSION_UNKNOWN", "CANCEL_REQUESTED",
+            "OPEN", "PARTIALLY_FILLED",
             "FILLED", "POSITION_UNPROTECTED",
         }
         unresolved_entries = [
@@ -125,7 +129,7 @@ class AutoTradingSessionController:
                 for existing in unresolved_entries
             )
         )
-        if not remaining and not unresolved_entries:
+        if not remaining and not unresolved_entries and not active_flatten_attempts:
             control = self.service._transition(
                 "FLATTEN_CONFIRMED_FLAT",
                 reason="MANAGED_EXPOSURE_ZERO",
@@ -142,6 +146,7 @@ class AutoTradingSessionController:
                 "remaining_positions": [],
                 "cancelled_entries": cancelled_entries,
                 "unresolved_entries": [],
+                "active_flatten_attempts": [],
                 "exits": exits,
                 "control": control,
             }
@@ -160,6 +165,7 @@ class AutoTradingSessionController:
             ],
             "cancelled_entries": cancelled_entries,
             "unresolved_entries": unresolved_entries,
+            "active_flatten_attempts": active_flatten_attempts,
             "exits": exits,
         }
 

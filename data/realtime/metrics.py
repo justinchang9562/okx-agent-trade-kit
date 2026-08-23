@@ -28,6 +28,7 @@ class RealtimeMetrics:
             "strategy_evaluations": 0,
             "trade_plans_generated": 0,
             "critical_queue_overflows": 0,
+            "stale_strategy_events": 0,
             "historical_bootstrap_requests": 0,
             "instrument_requests": 0,
         }

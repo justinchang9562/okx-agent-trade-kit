@@ -498,6 +498,8 @@ class TradingOrchestrator:
             blocking_reasons.append("TRADING_STOPPED")
         if any(order["state"] == OrderState.SUBMISSION_UNKNOWN.value for order in self.trade_store.get_orders()):
             blocking_reasons.append("SUBMISSION_UNKNOWN_REQUIRES_RECONCILIATION")
+        if any(order["state"] == OrderState.CANCEL_REQUESTED.value for order in self.trade_store.get_orders()):
+            blocking_reasons.append("CANCEL_REQUEST_REQUIRES_RECONCILIATION")
         if any(position.protection_state != "PROTECTED" for position in self.trade_store.managed_positions()):
             blocking_reasons.append("POSITION_UNPROTECTED")
         if health["system_capability"]["status"] == "READY":

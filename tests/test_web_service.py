@@ -7,10 +7,14 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from data.realtime.models import ConfirmedCandleEvent
 from execution.order_state import OrderState
+from execution.targeted_reconciler import TargetedOrderReconciler
 from storage.control_store import ControlStore
+from storage.trade_store import now_ms
 from tests.test_approval_revalidation import agent
 from tests.test_core_hardening import plan_for
+from tests.test_order_lifecycle_v041 import RaceBackend, RaceExecutor, row, valid_protection
 from trading_agent.config import load_config
 from trading_agent.control_state import AgentRuntimeState, ExecutionState, SessionState, TradingMode
 from trading_agent.service import (
@@ -460,6 +464,90 @@ def test_runtime_failure_degrades_and_disarms(tmp_path, market, account) -> None
         assert control["agent_runtime_state"] == "DEGRADED"
         assert control["execution_state"] == "DISARMED"
         assert control["connection_state"] == "STALE"
+    finally:
+        service.close()
+
+
+def test_stale_strategy_event_is_dropped_before_analysis(tmp_path, market, account) -> None:
+    service = service_for(tmp_path, market, account)
+    try:
+        service._session_preflight = lambda: []
+        service.start_session()
+        calls: list[str] = []
+        service._orchestrator.analyze = lambda symbol: calls.append(symbol)
+        service._handle_confirmed_candle(ConfirmedCandleEvent(
+            "BTC-USDT", "1m", now_ms() - 60_000, now_ms() - 10_000,
+        ))
+        assert calls == []
+        assert any(event["reason"] == "STALE_STRATEGY_EVENT" for event in service.events_after(0))
+    finally:
+        service.close()
+
+
+def test_market_event_queue_dedupes_and_fails_closed_on_backpressure(
+    tmp_path, market, account,
+) -> None:
+    config = replace(load_config(), root=tmp_path)
+    config.rules["realtime"]["event_queue_capacity"] = 1
+    orchestrator = agent(tmp_path, market, account)
+    orchestrator.get_health = lambda: ready_health(orchestrator)
+    service = TradingService(config, orchestrator, start_scheduler=False)
+    service._market_event_stop.set()
+    service._event_worker.join(timeout=2)
+    service.client_stream_connected("test-control-stream")
+    service.client_stream_acknowledged("test-control-stream")
+    try:
+        service._session_preflight = lambda: []
+        service.start_session()
+        first = ConfirmedCandleEvent("BTC-USDT", "1m", 1, now_ms())
+        service._on_confirmed_candle(first)
+        service._on_confirmed_candle(first)
+        assert service._market_event_queue.qsize() == 1
+        service._on_confirmed_candle(ConfirmedCandleEvent("ETH-USDT", "1m", 2, now_ms()))
+        assert service.control()["session_state"] == "DEGRADED"
+        assert any(
+            event["reason"] == "MARKET_EVENT_BACKLOG_OVERFLOW"
+            for event in service.events_after(0)
+        )
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_session"),
+    [("pause_session", "PAUSED"), ("stop_session", "STOPPED")],
+)
+def test_pause_or_stop_survives_cancel_fill_race(
+    tmp_path, market, account, long_signal, action, expected_session,
+) -> None:
+    service = service_for(tmp_path, market, account)
+    try:
+        service._session_preflight = lambda: []
+        service.start_session()
+        plan = plan_for(long_signal)
+        store = service._orchestrator.trade_store
+        service._run_core(store.save_plan, plan)
+        service._run_core(store.approve_and_create_order, plan, plan.plan_id, plan.entry)
+        service._run_core(
+            store.transition_order, plan.plan_id, OrderState.SUBMITTED.value,
+            okx_order_id="entry-1",
+        )
+        service._run_core(store.transition_order, plan.plan_id, OrderState.OPEN.value)
+        backend = RaceBackend()
+        backend.lookups.append(row(plan, "filled", plan.position_size))
+        backend.protections.append(valid_protection(plan))
+        service._orchestrator.order_manager.executor = RaceExecutor(backend)
+        service._orchestrator.order_manager.targeted_reconciler = TargetedOrderReconciler(
+            (0.0, 0.0), lambda _delay: None,
+        )
+
+        result = getattr(service, action)()
+
+        assert result["session_state"] == expected_session
+        position = service._run_core(store.managed_positions)[0]
+        assert position.quantity == plan.position_size
+        assert position.protection_state == "PROTECTED"
+        assert backend.cancel_calls == 1
     finally:
         service.close()
 

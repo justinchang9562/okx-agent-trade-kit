@@ -76,3 +76,5 @@ realtime:
   stale_after_seconds: 5
   candle_capacity: 500
   bootstrap_candles: 200
+  event_queue_capacity: 16
+  strategy_event_max_age_seconds: 5

@@ -318,46 +318,68 @@ class TradeStore:
     @synchronized
     def flatten_intent(self, plan_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
-            "SELECT * FROM flatten_intents WHERE plan_id = ?", (plan_id,),
+            """SELECT * FROM flatten_attempts WHERE plan_id = ?
+               ORDER BY attempt_number DESC LIMIT 1""", (plan_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def flatten_attempt(self, plan_id: str, attempt_number: int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM flatten_attempts WHERE plan_id = ? AND attempt_number = ?",
+            (plan_id, attempt_number),
         ).fetchone()
         return dict(row) if row else None
 
     @synchronized
     def create_flatten_intent(
         self, plan_id: str, client_order_id: str, symbol: str, requested_quantity: float,
+        attempt_number: int | None = None,
     ) -> dict[str, Any]:
         current = now_ms()
+        attempt = attempt_number or int(self.connection.execute(
+            "SELECT COALESCE(MAX(attempt_number), 0) + 1 value FROM flatten_attempts WHERE plan_id = ?",
+            (plan_id,),
+        ).fetchone()["value"])
         self.connection.execute(
-            """INSERT OR IGNORE INTO flatten_intents
-               (plan_id, client_order_id, symbol, requested_quantity, state,
+            """INSERT OR IGNORE INTO flatten_attempts
+               (plan_id, attempt_number, client_order_id, symbol, requested_quantity, state,
                 created_at_ms, updated_at_ms)
-               VALUES (?, ?, ?, ?, 'PREPARED', ?, ?)""",
-            (plan_id, client_order_id, symbol, requested_quantity, current, current),
+               VALUES (?, ?, ?, ?, ?, 'PREPARED', ?, ?)""",
+            (plan_id, attempt, client_order_id, symbol, requested_quantity, current, current),
         )
         self.connection.commit()
-        intent = self.flatten_intent(plan_id)
+        intent = self.flatten_attempt(plan_id, attempt)
         if intent is None:
             raise RuntimeError("FLATTEN_INTENT_PERSISTENCE_FAILED")
         return intent
 
     @synchronized
-    def update_flatten_intent(self, plan_id: str, state: str, **fields: Any) -> dict[str, Any]:
-        allowed = {"filled_quantity", "order_id", "raw_response_json", "last_error"}
+    def update_flatten_intent(
+        self, plan_id: str, state: str, *, attempt_number: int | None = None, **fields: Any,
+    ) -> dict[str, Any]:
+        allowed = {
+            "filled_quantity", "order_id", "raw_response_json", "last_error",
+            "terminal_confirmed", "reconciliation_complete", "protection_cleanup_json",
+        }
         invalid = set(fields).difference(allowed)
         if invalid:
             raise ValueError(f"INVALID_FLATTEN_INTENT_FIELDS:{sorted(invalid)}")
         values = dict(fields)
         values.update(state=state, updated_at_ms=now_ms())
         assignments = ", ".join(f"{key} = ?" for key in values)
+        attempt = attempt_number or int(self.connection.execute(
+            "SELECT MAX(attempt_number) value FROM flatten_attempts WHERE plan_id = ?", (plan_id,),
+        ).fetchone()["value"] or 0)
         cursor = self.connection.execute(
-            f"UPDATE flatten_intents SET {assignments} WHERE plan_id = ?",
-            (*values.values(), plan_id),
+            f"UPDATE flatten_attempts SET {assignments} WHERE plan_id = ? AND attempt_number = ?",
+            (*values.values(), plan_id, attempt),
         )
         if cursor.rowcount != 1:
             self.connection.rollback()
             raise LookupError("FLATTEN_INTENT_NOT_FOUND")
         self.connection.commit()
-        intent = self.flatten_intent(plan_id)
+        intent = self.flatten_attempt(plan_id, attempt)
         if intent is None:
             raise LookupError("FLATTEN_INTENT_NOT_FOUND")
         return intent
@@ -366,14 +388,45 @@ class TradeStore:
     def flatten_intents(self, active_only: bool = False) -> list[dict[str, Any]]:
         if active_only:
             rows = self.connection.execute(
-                "SELECT * FROM flatten_intents WHERE state NOT IN ('FILLED', 'CANCELLED') "
-                "ORDER BY created_at_ms"
+                "SELECT * FROM flatten_attempts "
+                "WHERE state NOT IN ('FILLED', 'CANCELLED', 'REJECTED', 'FAILED') "
+                "ORDER BY plan_id, attempt_number"
             ).fetchall()
         else:
             rows = self.connection.execute(
-                "SELECT * FROM flatten_intents ORDER BY created_at_ms"
+                "SELECT * FROM flatten_attempts ORDER BY plan_id, attempt_number"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    @synchronized
+    def flatten_attempts_for_plan(self, plan_id: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.connection.execute(
+            "SELECT * FROM flatten_attempts WHERE plan_id = ? ORDER BY attempt_number",
+            (plan_id,),
+        ).fetchall()]
+
+    @synchronized
+    def upsert_reconciled_exit_fill(
+        self,
+        plan_id: str,
+        fill_key: str,
+        order_id: str | None,
+        fill_timestamp_ms: int,
+        quantity: float,
+        price: float,
+    ) -> None:
+        self.connection.execute(
+            """INSERT INTO reconciled_exit_fills
+               (plan_id, fill_key, order_id, fill_timestamp_ms, quantity, price)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(plan_id, fill_key) DO UPDATE SET
+                 order_id=excluded.order_id,
+                 fill_timestamp_ms=excluded.fill_timestamp_ms,
+                 quantity=excluded.quantity,
+                 price=excluded.price""",
+            (plan_id, fill_key, order_id, fill_timestamp_ms, quantity, price),
+        )
+        self.connection.commit()
 
     @synchronized
     def position_slots_in_use(self, exclude_plan_id: str | None = None) -> int:
@@ -399,7 +452,8 @@ class TradeStore:
     def reserved_entry_notional(self, exclude_plan_id: str | None = None) -> float:
         reserved_states = (
             OrderState.APPROVED.value, OrderState.SUBMITTED.value,
-            OrderState.SUBMISSION_UNKNOWN.value, OrderState.OPEN.value,
+            OrderState.SUBMISSION_UNKNOWN.value, OrderState.CANCEL_REQUESTED.value,
+            OrderState.OPEN.value,
             OrderState.PARTIALLY_FILLED.value,
         )
         marks = ",".join("?" for _ in reserved_states)
@@ -560,6 +614,17 @@ class TradeStore:
              quantity, plan.stop, plan.take_profit, fees, slippage_abs, plan.strategy,
              plan.signal_score, plan.plan_id, order_id, entry_time_ms, entry_price, quantity,
              slippage_abs, slippage_pct, "ACTUAL" if fees is not None else "UNKNOWN"),
+        )
+        self.connection.execute(
+            """UPDATE trades
+                  SET entry = ?, size = ?, entry_price = ?, quantity = ?,
+                      order_id = COALESCE(?, order_id), slippage_abs = ?, slippage_pct = ?
+                WHERE plan_id = ? AND exit_time_ms IS NULL
+                  AND COALESCE(quantity, 0) < ?""",
+            (
+                entry_price, quantity, entry_price, quantity, order_id,
+                slippage_abs, slippage_pct, plan.plan_id, quantity,
+            ),
         )
         if fees is not None:
             self.connection.execute(

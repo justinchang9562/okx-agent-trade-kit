@@ -8,6 +8,7 @@ from decision.trade_plan import TradePlan
 from execution.demo_executor import DemoExecutor
 from execution.errors import PreSubmitRejectedError, SubmissionUncertainError
 from execution.order_state import OrderState
+from execution.targeted_reconciler import TargetedOrderReconciler
 from storage.trade_store import now_ms
 
 EXPLICIT_APPROVALS = {"确认执行", "CONFIRM EXECUTION", "CONFIRM DEMO ORDER"}
@@ -47,9 +48,15 @@ class OrderManager:
     RECENT_FILL_WINDOW_MS = 3 * 24 * 60 * 60 * 1000
     ARCHIVE_FILL_WINDOW_MS = 90 * 24 * 60 * 60 * 1000
 
-    def __init__(self, executor: DemoExecutor, store: Any) -> None:
+    def __init__(
+        self,
+        executor: DemoExecutor,
+        store: Any,
+        targeted_reconciler: TargetedOrderReconciler | None = None,
+    ) -> None:
         self.executor = executor
         self.store = store
+        self.targeted_reconciler = targeted_reconciler or TargetedOrderReconciler()
 
     @staticmethod
     def client_order_id(plan_id: str) -> str:
@@ -88,7 +95,7 @@ class OrderManager:
             self.store.transition_order(
                 plan.plan_id, OrderState.SUBMISSION_UNKNOWN.value, last_error=type(exc).__name__
             )
-            reconciled = self.reconcile_plan(plan.plan_id)
+            reconciled = self._new_order_fast_lane(plan.plan_id)
             if reconciled.get("found"):
                 return reconciled
             raise RuntimeError("SUBMISSION_UNKNOWN_RECONCILIATION_REQUIRED") from exc
@@ -111,8 +118,37 @@ class OrderManager:
             raw_response_json=json.dumps(result, default=str),
         )
         self.store.record_submission(plan.plan_id, plan.symbol, plan.side, plan.strategy, result)
-        return {"plan_id": plan.plan_id, "client_order_id": client_id,
-                "okx_order_id": order_id, "state": OrderState.SUBMITTED.value, "response": result}
+        reconciled = self._new_order_fast_lane(plan.plan_id)
+        if reconciled.get("found"):
+            return reconciled | {"response": result}
+        return reconciled | {
+            "plan_id": plan.plan_id,
+            "client_order_id": client_id,
+            "okx_order_id": order_id,
+            "state": OrderState.SUBMITTED.value,
+            "reconciliation": "RECONCILIATION_REQUIRED",
+            "response": result,
+        }
+
+    def _new_order_fast_lane(self, plan_id: str) -> dict[str, Any]:
+        result = self.targeted_reconciler.run(
+            lambda: self.reconcile_plan(plan_id),
+            lambda item: item.get("state") in {
+                OrderState.FILLED.value,
+                OrderState.CANCELLED.value,
+                OrderState.REJECTED.value,
+            },
+        )
+        if result.get("state") == OrderState.POSITION_UNPROTECTED.value:
+            return result | {"reconciliation": "POSITION_UNPROTECTED"}
+        if not result.get("found") or result.get("state") in {
+            OrderState.SUBMITTED.value,
+            OrderState.SUBMISSION_UNKNOWN.value,
+            OrderState.OPEN.value,
+            OrderState.PARTIALLY_FILLED.value,
+        }:
+            return result | {"reconciliation": "RECONCILIATION_REQUIRED"}
+        return result | {"reconciliation": "COMPLETE"}
 
     def _apply_remote_order(self, local: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
         state, filled, average = _map_state(row, float(local["requested_size"]))
@@ -130,25 +166,45 @@ class OrderManager:
         }
         if state == OrderState.FILLED.value:
             fields["filled_at_ms"] = now_ms()
+        if state in {OrderState.CANCELLED.value, OrderState.REJECTED.value}:
+            fields["closed_at_ms"] = now_ms()
         self.store.transition_order(local["plan_id"], state, **fields)
-        if state in {OrderState.PARTIALLY_FILLED.value, OrderState.FILLED.value}:
+        lifecycle_state = state
+        managed_state = state
+        has_managed_fill = filled > 0 and state in {
+            OrderState.PARTIALLY_FILLED.value,
+            OrderState.FILLED.value,
+            OrderState.CANCELLED.value,
+        }
+        if has_managed_fill:
             protection, protective_order_ids = self._protection_state(local, order_id, filled)
-            final_state = state
-            if state == OrderState.FILLED.value and protection != "PROTECTED":
-                final_state = OrderState.POSITION_UNPROTECTED.value
+            managed_state = (
+                OrderState.PARTIALLY_FILLED.value
+                if state == OrderState.CANCELLED.value else state
+            )
+            if protection != "PROTECTED" and state in {
+                OrderState.FILLED.value,
+                OrderState.CANCELLED.value,
+            }:
+                managed_state = OrderState.POSITION_UNPROTECTED.value
+            if state == OrderState.FILLED.value and managed_state == OrderState.POSITION_UNPROTECTED.value:
+                lifecycle_state = OrderState.POSITION_UNPROTECTED.value
                 self.store.transition_order(
-                    local["plan_id"], final_state, protection_state=protection,
+                    local["plan_id"], lifecycle_state, protection_state=protection,
                     last_error="PROTECTION_NOT_VERIFIED",
                 )
             else:
-                self.store.transition_order(local["plan_id"], state, protection_state=protection)
+                self.store.transition_order(
+                    local["plan_id"], lifecycle_state, protection_state=protection,
+                    last_error=("PROTECTION_NOT_VERIFIED" if protection != "PROTECTED" else None),
+                )
             self.store.upsert_managed_position(
                 local["plan_id"], order_id, local["symbol"], filled, average,
-                final_state, protection, protective_order_ids,
+                managed_state, protection, protective_order_ids,
             )
-            state = final_state
+            state = lifecycle_state
         self._backfill_fill_data(local, order_id)
-        if state in {OrderState.FILLED.value, OrderState.POSITION_UNPROTECTED.value} and average is not None:
+        if has_managed_fill and average is not None:
             plan = self.store.get_plan(local["plan_id"])
             updated = self.store.order_for_plan(local["plan_id"])
             if plan is not None and updated is not None:
@@ -156,8 +212,15 @@ class OrderManager:
                     plan, order_id, int(updated.get("filled_at_ms") or now_ms()), average, filled,
                     updated.get("fee"), slippage_abs, slippage_pct,
                 )
-        return {"found": True, "plan_id": local["plan_id"], "state": state,
-                "filled_size": filled, "average_fill_price": average, "okx_order_id": order_id}
+        return {
+            "found": True,
+            "plan_id": local["plan_id"],
+            "state": state,
+            "filled_size": filled,
+            "average_fill_price": average,
+            "okx_order_id": order_id,
+            "managed_position_state": managed_state if has_managed_fill else None,
+        }
 
     def _protection_state(
         self, local: dict[str, Any], order_id: str | None, filled_quantity: float,
@@ -271,19 +334,40 @@ class OrderManager:
         local = self.store.order_for_plan(plan_id)
         if local is None:
             return {"found": False, "reason": "LOCAL_ORDER_NOT_FOUND"}
+        cancel_was_requested = local["state"] == OrderState.CANCEL_REQUESTED.value
         payload: dict[str, Any] | None = None
         try:
             payload = self.executor.backend.get_order_by_client_id(local["symbol"], local["client_order_id"])
         except Exception:
-            if local.get("okx_order_id"):
-                try:
-                    payload = self.executor.backend.get_order(local["symbol"], local["okx_order_id"])
-                except Exception:
-                    payload = None
+            payload = None
         rows = _rows(payload or {})
+        if not rows and local.get("okx_order_id"):
+            try:
+                payload = self.executor.backend.get_order(local["symbol"], local["okx_order_id"])
+            except Exception:
+                payload = None
+            rows = _rows(payload or {})
         if not rows:
             return {"found": False, "plan_id": plan_id, "state": local["state"]}
-        return self._apply_remote_order(local, rows[0])
+        result = self._apply_remote_order(local, rows[0])
+        if cancel_was_requested and result.get("state") in {
+            OrderState.SUBMITTED.value,
+            OrderState.OPEN.value,
+            OrderState.PARTIALLY_FILLED.value,
+        }:
+            current = self.store.order_for_plan(plan_id)
+            if current is not None and current["state"] != OrderState.CANCEL_REQUESTED.value:
+                self.store.transition_order(
+                    plan_id,
+                    OrderState.CANCEL_REQUESTED.value,
+                    last_error="CANCEL_RECONCILIATION_REQUIRED",
+                )
+            return result | {
+                "remote_state": result["state"],
+                "state": OrderState.CANCEL_REQUESTED.value,
+                "reason": "CANCEL_RECONCILIATION_REQUIRED",
+            }
+        return result
 
     def recover_active_orders(self) -> list[dict[str, Any]]:
         recovered = [self.reconcile_plan(order["plan_id"]) for order in self.store.active_orders()]
@@ -535,6 +619,7 @@ class OrderManager:
             OrderState.APPROVED.value,
             OrderState.SUBMITTED.value,
             OrderState.SUBMISSION_UNKNOWN.value,
+            OrderState.CANCEL_REQUESTED.value,
             OrderState.OPEN.value,
             OrderState.PARTIALLY_FILLED.value,
         }
@@ -553,6 +638,9 @@ class OrderManager:
             local = self.store.order_for_plan(plan_id) or original
             if local["state"] not in pending_states:
                 continue
+            if local["state"] == OrderState.CANCEL_REQUESTED.value:
+                results.append(self._reconcile_cancel_request(plan_id))
+                continue
             order_id = str(local.get("okx_order_id") or "")
             if not order_id:
                 results.append({
@@ -568,11 +656,10 @@ class OrderManager:
                     raise RuntimeError("CANCEL_REJECTED")
                 self.store.transition_order(
                     plan_id,
-                    OrderState.CANCELLED.value,
-                    closed_at_ms=now_ms(),
+                    OrderState.CANCEL_REQUESTED.value,
                     raw_response_json=json.dumps(payload, default=str),
                 )
-                results.append({"plan_id": plan_id, "state": OrderState.CANCELLED.value})
+                results.append(self._reconcile_cancel_request(plan_id))
             except Exception as exc:
                 results.append({
                     "plan_id": plan_id,
@@ -581,35 +668,129 @@ class OrderManager:
                 })
         return results
 
+    def _reconcile_cancel_request(self, plan_id: str) -> dict[str, Any]:
+        result = self.targeted_reconciler.run(
+            lambda: self.reconcile_plan(plan_id),
+            lambda item: (
+                item.get("state") in {
+                    OrderState.CANCELLED.value,
+                    OrderState.REJECTED.value,
+                    OrderState.FILLED.value,
+                }
+                and item.get("managed_position_state")
+                != OrderState.POSITION_UNPROTECTED.value
+            ),
+        )
+        state = str(result.get("state") or "")
+        if (
+            state == OrderState.POSITION_UNPROTECTED.value
+            or result.get("managed_position_state") == OrderState.POSITION_UNPROTECTED.value
+        ):
+            return result | {"reason": "POSITION_UNPROTECTED"}
+        if state in {
+            OrderState.CANCELLED.value,
+            OrderState.REJECTED.value,
+            OrderState.FILLED.value,
+        }:
+            return result
+        local = self.store.order_for_plan(plan_id)
+        if local and local["state"] in {
+            OrderState.SUBMITTED.value,
+            OrderState.OPEN.value,
+            OrderState.PARTIALLY_FILLED.value,
+            OrderState.CANCEL_REQUESTED.value,
+        }:
+            self.store.transition_order(
+                plan_id,
+                OrderState.CANCEL_REQUESTED.value,
+                last_error="CANCEL_RECONCILIATION_REQUIRED",
+            )
+        return result | {
+            "plan_id": plan_id,
+            "state": OrderState.CANCEL_REQUESTED.value,
+            "reason": "CANCEL_RECONCILIATION_REQUIRED",
+        }
+
     @staticmethod
-    def flatten_client_order_id(plan_id: str) -> str:
-        digest = hashlib.sha256(plan_id.encode("utf-8")).hexdigest()[:27]
+    def flatten_client_order_id(plan_id: str, attempt_number: int = 1) -> str:
+        digest = hashlib.sha256(f"{plan_id}:{attempt_number}".encode("utf-8")).hexdigest()[:24]
         return f"flat-{digest}"
 
     def flatten_managed_positions(self) -> list[dict[str, Any]]:
-        """Create at most one persistent close intent for each Agent-managed position."""
+        """Advance persisted close attempts without ever retrying a nonterminal attempt."""
         results: list[dict[str, Any]] = []
+        for attempt in self.store.flatten_intents(active_only=True):
+            if attempt["state"] == "PROTECTION_CLEANUP_INCOMPLETE":
+                results.append(self.reconcile_flatten_intent(
+                    str(attempt["plan_id"]), int(attempt["attempt_number"]),
+                ))
         for position in self.store.managed_positions():
-            intent = self.store.flatten_intent(position.plan_id)
-            if intent is not None:
-                results.append(self.reconcile_flatten_intent(position.plan_id))
-                continue
-            remaining = max(0.0, position.quantity - position.exit_filled_quantity)
-            if remaining <= 1e-12:
-                results.append({
-                    "plan_id": position.plan_id,
-                    "state": "RECONCILIATION_REQUIRED",
-                    "reason": "MANAGED_POSITION_ZERO_NOT_CLOSED",
+            attempts = self.store.flatten_attempts_for_plan(position.plan_id)
+            latest_result: dict[str, Any] | None = None
+            for attempt in attempts:
+                latest_result = self.reconcile_flatten_intent(
+                    position.plan_id, int(attempt["attempt_number"]),
+                )
+            active_position = next(
+                (
+                    item for item in self.store.managed_positions()
+                    if item.plan_id == position.plan_id
+                ),
+                None,
+            )
+            if active_position is None:
+                results.append(latest_result or {
+                    "plan_id": position.plan_id, "state": OrderState.FILLED.value,
                 })
                 continue
-            client_id = self.flatten_client_order_id(position.plan_id)
-            self.store.create_flatten_intent(
-                position.plan_id, client_id, position.symbol, remaining,
+            position = active_position
+            attempts = self.store.flatten_attempts_for_plan(position.plan_id)
+            latest = attempts[-1] if attempts else None
+            confirmed_fills = self.store.reconciled_exit_fills(position.plan_id)
+            confirmed_quantity = sum(float(item["quantity"]) for item in confirmed_fills)
+            if latest is not None and latest["state"] not in {
+                OrderState.FILLED.value,
+                OrderState.CANCELLED.value,
+                OrderState.REJECTED.value,
+                "FAILED",
+                "PROTECTION_CLEANUP_INCOMPLETE",
+            }:
+                active_unfilled = max(
+                    0.0,
+                    float(latest["requested_quantity"]) - float(latest["filled_quantity"]),
+                )
+                if confirmed_quantity + active_unfilled > position.quantity + 1e-12:
+                    results.append(self._cancel_flatten_attempt(latest))
+                    continue
+            if latest is not None and not (
+                bool(latest["terminal_confirmed"])
+                and bool(latest["reconciliation_complete"])
+                and latest["state"] in {
+                    OrderState.CANCELLED.value,
+                    OrderState.REJECTED.value,
+                    "FAILED",
+                }
+            ):
+                results.append(latest_result or {
+                    "plan_id": position.plan_id,
+                    "state": latest["state"],
+                    "reason": "FLATTEN_RECONCILIATION_REQUIRED",
+                })
+                continue
+            remaining = max(0.0, position.quantity - confirmed_quantity)
+            if remaining <= 1e-12:
+                results.append(self._close_flatten_position(position, latest, confirmed_fills))
+                continue
+            attempt_number = int(latest["attempt_number"]) + 1 if latest else 1
+            client_id = self.flatten_client_order_id(position.plan_id, attempt_number)
+            intent = self.store.create_flatten_intent(
+                position.plan_id, client_id, position.symbol, remaining, attempt_number,
             )
             executor = getattr(self.executor, "execute_managed_exit", None)
             if executor is None:
                 self.store.update_flatten_intent(
-                    position.plan_id, "REJECTED", last_error="FLATTEN_EXECUTOR_UNAVAILABLE",
+                    position.plan_id, "REJECTED", attempt_number=attempt_number,
+                    last_error="FLATTEN_EXECUTOR_UNAVAILABLE",
                 )
                 results.append({
                     "plan_id": position.plan_id,
@@ -622,17 +803,19 @@ class OrderManager:
             except (SubmissionUncertainError, TimeoutError, ConnectionError) as exc:
                 self.store.update_flatten_intent(
                     position.plan_id, OrderState.SUBMISSION_UNKNOWN.value,
+                    attempt_number=attempt_number,
                     last_error=type(exc).__name__,
                 )
-                results.append(self.reconcile_flatten_intent(position.plan_id))
+                results.append(self._targeted_flatten_reconcile(position.plan_id, attempt_number))
                 continue
             except Exception as exc:
                 self.store.update_flatten_intent(
-                    position.plan_id, "REJECTED", last_error=type(exc).__name__,
+                    position.plan_id, "FAILED", attempt_number=attempt_number,
+                    last_error=type(exc).__name__,
                 )
                 results.append({
                     "plan_id": position.plan_id,
-                    "state": "REJECTED",
+                    "state": "FAILED",
                     "reason": type(exc).__name__,
                 })
                 continue
@@ -640,8 +823,11 @@ class OrderManager:
             if str(row.get("sCode", "0")) not in {"", "0"}:
                 self.store.update_flatten_intent(
                     position.plan_id, "REJECTED",
+                    attempt_number=attempt_number,
                     raw_response_json=json.dumps(payload, default=str),
                     last_error="OKX_EXIT_REJECTED",
+                    terminal_confirmed=True,
+                    reconciliation_complete=True,
                 )
                 results.append({
                     "plan_id": position.plan_id,
@@ -653,35 +839,107 @@ class OrderManager:
             self.store.update_flatten_intent(
                 position.plan_id,
                 OrderState.SUBMITTED.value,
+                attempt_number=attempt_number,
                 order_id=order_id,
                 raw_response_json=json.dumps(payload, default=str),
             )
-            results.append({
-                "plan_id": position.plan_id,
-                "state": OrderState.SUBMITTED.value,
+            reconciled = self._targeted_flatten_reconcile(position.plan_id, attempt_number)
+            results.append(reconciled | {
                 "client_order_id": client_id,
-                "order_id": order_id,
+                "order_id": reconciled.get("order_id") or order_id,
+                "attempt_number": intent["attempt_number"],
             })
         return results
 
-    def reconcile_flatten_intent(self, plan_id: str) -> dict[str, Any]:
-        intent = self.store.flatten_intent(plan_id)
+    def _targeted_flatten_reconcile(
+        self, plan_id: str, attempt_number: int, *, allow_close: bool = True,
+    ) -> dict[str, Any]:
+        return self.targeted_reconciler.run(
+            lambda: self.reconcile_flatten_intent(
+                plan_id, attempt_number, allow_close=allow_close,
+            ),
+            lambda item: item.get("state") in {
+                OrderState.FILLED.value,
+                OrderState.CANCELLED.value,
+                OrderState.REJECTED.value,
+                "PROTECTION_CLEANUP_INCOMPLETE",
+            },
+        )
+
+    def _cancel_flatten_attempt(self, intent: dict[str, Any]) -> dict[str, Any]:
+        plan_id = str(intent["plan_id"])
+        attempt_number = int(intent["attempt_number"])
+        if intent["state"] == OrderState.CANCEL_REQUESTED.value:
+            return self._targeted_flatten_reconcile(
+                plan_id, attempt_number, allow_close=False,
+            )
+        order_id = str(intent.get("order_id") or "")
+        if not order_id:
+            return {
+                "plan_id": plan_id,
+                "attempt_number": attempt_number,
+                "state": intent["state"],
+                "reason": "FLATTEN_OVERSELL_RISK_RECONCILIATION_REQUIRED",
+            }
+        try:
+            payload = self.executor.backend.cancel_order(intent["symbol"], order_id)
+            row = _rows(payload)[0] if _rows(payload) else {}
+            if str(row.get("sCode", "0")) not in {"", "0"}:
+                raise RuntimeError("CANCEL_REJECTED")
+            self.store.update_flatten_intent(
+                plan_id,
+                OrderState.CANCEL_REQUESTED.value,
+                attempt_number=attempt_number,
+                raw_response_json=json.dumps(payload, default=str),
+                last_error="FLATTEN_OVERSELL_RISK_CANCEL_REQUESTED",
+            )
+        except Exception as exc:
+            return {
+                "plan_id": plan_id,
+                "attempt_number": attempt_number,
+                "state": intent["state"],
+                "reason": f"FLATTEN_OVERSELL_RISK:{type(exc).__name__}",
+            }
+        return self._targeted_flatten_reconcile(
+            plan_id, attempt_number, allow_close=False,
+        )
+
+    def reconcile_flatten_intent(
+        self,
+        plan_id: str,
+        attempt_number: int | None = None,
+        *,
+        allow_close: bool = True,
+    ) -> dict[str, Any]:
+        intent = (
+            self.store.flatten_attempt(plan_id, attempt_number)
+            if attempt_number is not None else self.store.flatten_intent(plan_id)
+        )
         if intent is None:
             return {"plan_id": plan_id, "found": False, "reason": "FLATTEN_INTENT_NOT_FOUND"}
+        attempt_number = int(intent["attempt_number"])
+        if intent["state"] == "PROTECTION_CLEANUP_INCOMPLETE":
+            return self._cleanup_flatten_protection(plan_id, attempt_number)
         if intent["state"] == "FILLED":
-            return {"plan_id": plan_id, "found": True, "state": "FILLED"}
+            return {
+                "plan_id": plan_id, "found": True, "state": "FILLED",
+                "attempt_number": attempt_number,
+            }
+        cancel_was_requested = intent["state"] == OrderState.CANCEL_REQUESTED.value
         payload: dict[str, Any] | None = None
         try:
             payload = self.executor.backend.get_order_by_client_id(
                 intent["symbol"], intent["client_order_id"],
             )
         except Exception:
-            if intent.get("order_id"):
-                try:
-                    payload = self.executor.backend.get_order(intent["symbol"], intent["order_id"])
-                except Exception:
-                    payload = None
+            payload = None
         rows = _rows(payload or {})
+        if not rows and intent.get("order_id"):
+            try:
+                payload = self.executor.backend.get_order(intent["symbol"], intent["order_id"])
+            except Exception:
+                payload = None
+            rows = _rows(payload or {})
         if not rows:
             return {
                 "plan_id": plan_id,
@@ -691,13 +949,99 @@ class OrderManager:
             }
         row = rows[0]
         state, filled, average = _map_state(row, float(intent["requested_quantity"]))
+        remote_state = state
+        if cancel_was_requested and state in {
+            OrderState.SUBMITTED.value,
+            OrderState.OPEN.value,
+            OrderState.PARTIALLY_FILLED.value,
+        }:
+            state = OrderState.CANCEL_REQUESTED.value
         order_id = str(row.get("ordId") or intent.get("order_id") or "") or None
         self.store.update_flatten_intent(
-            plan_id, state, filled_quantity=filled, order_id=order_id,
+            plan_id, state, attempt_number=attempt_number,
+            filled_quantity=filled, order_id=order_id,
             raw_response_json=json.dumps(row, default=str),
+            terminal_confirmed=state in {
+                OrderState.FILLED.value, OrderState.CANCELLED.value, OrderState.REJECTED.value,
+            },
+            reconciliation_complete=(
+                state in {OrderState.FILLED.value, OrderState.CANCELLED.value, OrderState.REJECTED.value}
+                and (filled <= 1e-12 or average is not None)
+            ),
         )
-        if state == OrderState.PARTIALLY_FILLED.value:
-            self.store.mark_managed_partial_exit(plan_id, filled, {})
+        if filled > 0 and average is not None:
+            self.store.upsert_reconciled_exit_fill(
+                plan_id,
+                f"flatten-attempt:{attempt_number}",
+                order_id,
+                int(row.get("fillTime") or row.get("uTime") or now_ms()),
+                filled,
+                average,
+            )
+        confirmed_fills = self.store.reconciled_exit_fills(plan_id)
+        confirmed_quantity = sum(float(item["quantity"]) for item in confirmed_fills)
+        position = next(
+            (item for item in self.store.managed_positions() if item.plan_id == plan_id),
+            None,
+        )
+        if position is not None and 0 < confirmed_quantity < position.quantity:
+            self.store.mark_managed_partial_exit(plan_id, confirmed_quantity, {})
+        if position is not None and confirmed_quantity + 1e-12 >= position.quantity:
+            if not allow_close:
+                return {
+                    "plan_id": plan_id,
+                    "found": True,
+                    "state": state,
+                    "filled_quantity": filled,
+                    "order_id": order_id,
+                    "attempt_number": attempt_number,
+                    "confirmed_exit_quantity": confirmed_quantity,
+                    "remote_state": remote_state,
+                }
+            active_others = [
+                item for item in self.store.flatten_attempts_for_plan(plan_id)
+                if int(item["attempt_number"]) != attempt_number
+                and item["state"] not in {
+                    OrderState.FILLED.value,
+                    OrderState.CANCELLED.value,
+                    OrderState.REJECTED.value,
+                    "FAILED",
+                    "PROTECTION_CLEANUP_INCOMPLETE",
+                }
+            ]
+            for other in active_others:
+                cancel_result = self._cancel_flatten_attempt(other)
+                if cancel_result.get("state") not in {
+                    OrderState.FILLED.value,
+                    OrderState.CANCELLED.value,
+                    OrderState.REJECTED.value,
+                }:
+                    return {
+                        "plan_id": plan_id,
+                        "found": True,
+                        "state": "FLATTEN_INCOMPLETE",
+                        "reason": "ACTIVE_EXIT_CANCEL_RECONCILIATION_REQUIRED",
+                        "attempt_number": attempt_number,
+                        "confirmed_exit_quantity": confirmed_quantity,
+                    }
+            confirmed_fills = self.store.reconciled_exit_fills(plan_id)
+            confirmed_quantity = sum(float(item["quantity"]) for item in confirmed_fills)
+            if confirmed_quantity > position.quantity + 1e-12:
+                self.store.update_flatten_intent(
+                    plan_id,
+                    "RECONCILIATION_FAILED",
+                    attempt_number=attempt_number,
+                    last_error="CONFIRMED_EXIT_EXCEEDS_MANAGED_QUANTITY",
+                )
+                return {
+                    "plan_id": plan_id,
+                    "found": True,
+                    "state": "RECONCILIATION_FAILED",
+                    "reason": "CONFIRMED_EXIT_EXCEEDS_MANAGED_QUANTITY",
+                    "attempt_number": attempt_number,
+                    "confirmed_exit_quantity": confirmed_quantity,
+                }
+            return self._close_flatten_position(position, intent, confirmed_fills)
         if state != OrderState.FILLED.value or average is None:
             return {
                 "plan_id": plan_id,
@@ -705,26 +1049,47 @@ class OrderManager:
                 "state": state,
                 "filled_quantity": filled,
                 "order_id": order_id,
+                "attempt_number": attempt_number,
+                "confirmed_exit_quantity": confirmed_quantity,
+                "remote_state": remote_state,
             }
-        position = next(
-            (item for item in self.store.managed_positions() if item.plan_id == plan_id),
-            None,
-        )
-        if position is None:
-            return {"plan_id": plan_id, "found": True, "state": "FILLED"}
+        return {
+            "plan_id": plan_id,
+            "found": True,
+            "state": "RECONCILIATION_REQUIRED",
+            "attempt_number": attempt_number,
+        }
+
+    def _close_flatten_position(
+        self, position: Any, intent: dict[str, Any] | None, fills: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        plan_id = position.plan_id
+        if not fills:
+            return {"plan_id": plan_id, "state": "RECONCILIATION_REQUIRED"}
+        quantity = sum(float(item["quantity"]) for item in fills)
+        if quantity + 1e-12 < position.quantity:
+            return {
+                "plan_id": plan_id, "state": "FLATTEN_INCOMPLETE",
+                "confirmed_exit_quantity": quantity,
+            }
+        weighted = sum(float(item["price"]) * float(item["quantity"]) for item in fills)
+        average = weighted / quantity
+        last_fill = max(fills, key=lambda item: int(item["fill_timestamp_ms"]))
+        attempt_number = int((intent or self.store.flatten_intent(plan_id))["attempt_number"])
         try:
             self.store.close_trade(
                 plan_id,
-                int(row.get("fillTime") or row.get("uTime") or now_ms()),
+                int(last_fill["fill_timestamp_ms"]),
                 average,
                 None,
-                order_id,
-                exit_filled_quantity=filled,
+                str(last_fill.get("order_id") or "") or None,
+                exit_filled_quantity=quantity,
                 exit_fee_breakdown={},
             )
         except Exception as exc:
             self.store.update_flatten_intent(
-                plan_id, "RECONCILIATION_FAILED", last_error=type(exc).__name__,
+                plan_id, "RECONCILIATION_FAILED", attempt_number=attempt_number,
+                last_error=type(exc).__name__,
             )
             return {
                 "plan_id": plan_id,
@@ -732,24 +1097,75 @@ class OrderManager:
                 "state": "RECONCILIATION_FAILED",
                 "reason": type(exc).__name__,
             }
-        cleanup: list[dict[str, str]] = []
+        return self._cleanup_flatten_protection(plan_id, attempt_number)
+
+    def _cleanup_flatten_protection(
+        self, plan_id: str, attempt_number: int,
+    ) -> dict[str, Any]:
+        attempt = self.store.flatten_attempt(plan_id, attempt_number)
+        if attempt is None:
+            return {
+                "plan_id": plan_id,
+                "state": "RECONCILIATION_REQUIRED",
+                "reason": "FLATTEN_ATTEMPT_NOT_FOUND",
+            }
+        position = next(
+            (
+                item for item in self.store.managed_positions(active_only=False)
+                if item.plan_id == plan_id
+            ),
+            None,
+        )
+        if position is None or position.state != OrderState.CLOSED.value:
+            return {
+                "plan_id": plan_id, "state": "RECONCILIATION_REQUIRED",
+                "reason": "POSITION_NOT_CONFIRMED_CLOSED",
+            }
+        try:
+            persisted_cleanup = json.loads(attempt.get("protection_cleanup_json") or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            persisted_cleanup = []
+        cleanup_by_id = {
+            str(item.get("order_id")): item
+            for item in persisted_cleanup
+            if isinstance(item, dict) and item.get("order_id")
+        }
+        protection_ids_valid = True
         try:
             protective_ids = json.loads(position.protective_order_ids_json or "[]")
         except (TypeError, ValueError, json.JSONDecodeError):
+            protection_ids_valid = False
             protective_ids = []
         for protective_id in protective_ids:
+            identifier = str(protective_id)
+            if cleanup_by_id.get(identifier, {}).get("state") == "CANCELLED":
+                continue
             try:
-                self.executor.backend.cancel_protection_order(position.symbol, str(protective_id))
-                cleanup.append({"order_id": str(protective_id), "state": "CANCELLED"})
+                self.executor.backend.cancel_protection_order(position.symbol, identifier)
+                cleanup_by_id[identifier] = {"order_id": identifier, "state": "CANCELLED"}
             except Exception as exc:
-                cleanup.append({"order_id": str(protective_id), "state": type(exc).__name__})
-        self.store.update_flatten_intent(plan_id, "FILLED", filled_quantity=filled, order_id=order_id)
+                cleanup_by_id[identifier] = {
+                    "order_id": identifier,
+                    "state": type(exc).__name__,
+                }
+        cleanup = [cleanup_by_id[str(item)] for item in protective_ids]
+        complete = (
+            protection_ids_valid
+            and not (position.protection_state == "PROTECTED" and not protective_ids)
+            and all(item["state"] == "CANCELLED" for item in cleanup)
+        )
+        final_state = "FILLED" if complete else "PROTECTION_CLEANUP_INCOMPLETE"
+        self.store.update_flatten_intent(
+            plan_id, final_state, attempt_number=attempt_number,
+            terminal_confirmed=True, reconciliation_complete=complete,
+            last_error=None if complete else "PROTECTION_CLEANUP_INCOMPLETE",
+            protection_cleanup_json=json.dumps(cleanup, sort_keys=True),
+        )
         return {
             "plan_id": plan_id,
             "found": True,
-            "state": "FILLED",
-            "filled_quantity": filled,
-            "order_id": order_id,
+            "state": final_state,
+            "attempt_number": attempt_number,
             "protection_cleanup": cleanup,
         }
 
@@ -762,10 +1178,13 @@ class OrderManager:
         local = self.store.order_for_plan(plan_id)
         if not local or not local.get("okx_order_id"):
             raise LookupError("ORDER_NOT_CANCELLABLE")
-        result = self.executor.backend.cancel_order(local["symbol"], local["okx_order_id"])
-        row = _rows(result)[0] if _rows(result) else {}
+        payload = self.executor.backend.cancel_order(local["symbol"], local["okx_order_id"])
+        row = _rows(payload)[0] if _rows(payload) else {}
         if str(row.get("sCode", "0")) not in {"", "0"}:
             raise RuntimeError("CANCEL_REJECTED")
-        self.store.transition_order(plan_id, OrderState.CANCELLED.value, closed_at_ms=now_ms(),
-                                    raw_response_json=json.dumps(result, default=str))
-        return result
+        self.store.transition_order(
+            plan_id,
+            OrderState.CANCEL_REQUESTED.value,
+            raw_response_json=json.dumps(payload, default=str),
+        )
+        return self._reconcile_cancel_request(plan_id) | {"cancel_response": payload}

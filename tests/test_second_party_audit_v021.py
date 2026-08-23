@@ -319,8 +319,17 @@ def test_schema_migration_is_versioned_and_preserves_existing_data(tmp_path) -> 
     legacy.close()
     migrated = connect(path)
     columns = {row["name"] for row in migrated.execute("PRAGMA table_info(managed_positions)")}
+    flatten_columns = {
+        row["name"] for row in migrated.execute("PRAGMA table_info(flatten_attempts)")
+    }
     assert schema_version(migrated) == LATEST_SCHEMA_VERSION
     assert {"exit_order_id", "protective_order_ids_json"}.issubset(columns)
+    assert {
+        "attempt_number",
+        "terminal_confirmed",
+        "reconciliation_complete",
+        "protection_cleanup_json",
+    }.issubset(flatten_columns)
     assert migrated.execute("SELECT COUNT(*) count FROM signals").fetchone()["count"] == 1
     migrated.close()
 
@@ -369,4 +378,4 @@ def test_mcp_tool_error_does_not_echo_sensitive_stderr_or_payload() -> None:
 
 
 def test_component_version_tracks_remediation_release() -> None:
-    assert __version__ == "0.4.0"
+    assert __version__ == "0.4.1"

@@ -36,7 +36,7 @@ class StdioMCPClient:
         try:
             self._request("initialize", {
                 "protocolVersion": "2025-06-18", "capabilities": {},
-                "clientInfo": {"name": "okx-agent-trade-kit", "version": "0.4.0"},
+                "clientInfo": {"name": "okx-agent-trade-kit", "version": "0.4.1"},
             })
             self._notify("notifications/initialized", {})
         except Exception:
