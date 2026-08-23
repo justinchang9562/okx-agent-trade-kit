@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from decision.trade_plan import TradePlan
 from execution.base_backend import BaseBackend
 from execution.errors import PreSubmitRejectedError
+
+
+def _plain_decimal(value: float) -> str:
+    """Serialize an OKX numeric parameter without exponent notation."""
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise PreSubmitRejectedError("INVALID_ORDER_NUMERIC_VALUE") from exc
+    if not number.is_finite() or number <= 0:
+        raise PreSubmitRejectedError("INVALID_ORDER_NUMERIC_VALUE")
+    return format(number, "f")
 
 
 class DemoExecutor:
@@ -33,10 +45,10 @@ class DemoExecutor:
         self._require_entry_allowed()
         return self.backend.place_order({
             "instId": plan.symbol, "side": "buy", "ordType": "market",
-            "sz": str(plan.position_size), "tdMode": "cash", "tgtCcy": "base_ccy",
+            "sz": _plain_decimal(plan.position_size), "tdMode": "cash", "tgtCcy": "base_ccy",
             "clOrdId": plan.plan_id[:32],
-            "slTriggerPx": str(plan.stop), "slOrdPx": "-1",
-            "tpTriggerPx": str(plan.take_profit), "tpOrdPx": "-1",
+            "slTriggerPx": _plain_decimal(plan.stop), "slOrdPx": "-1",
+            "tpTriggerPx": _plain_decimal(plan.take_profit), "tpOrdPx": "-1",
         })
 
     def execute_managed_exit(
@@ -52,7 +64,7 @@ class DemoExecutor:
             "instId": symbol,
             "side": "sell",
             "ordType": "market",
-            "sz": str(quantity),
+            "sz": _plain_decimal(quantity),
             "tdMode": "cash",
             "tgtCcy": "base_ccy",
             "clOrdId": client_order_id,

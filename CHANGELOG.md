@@ -10,6 +10,8 @@
   alphanumeric protocol requirement.
 - Corrected realtime freshness checks for event-driven ticker/books5 channels while preserving transport,
   confirmed-candle, risk, and execution fail-closed guards.
+- Serialized entry, exit, stop-loss, and take-profit order values as plain decimals so OKX never
+  receives scientific notation such as `5e-05` for valid minimum-size orders.
 - Preserved the five top safety chips, Approval Center primary navigation, spacious visual layout, Demo-only MCP path, and frozen v0.4.1 trading core.
 
 ## 0.4.1 - 2026-08-23
