@@ -12,6 +12,8 @@
   confirmed-candle, risk, and execution fail-closed guards.
 - Serialized entry, exit, stop-loss, and take-profit order values as plain decimals so OKX never
   receives scientific notation such as `5e-05` for valid minimum-size orders.
+- Changed protected Demo entries to limit buys at the already revalidated and tick-quantized trade-plan
+  price, avoiding OKX's unsupported market-buy/base-currency/attached-TP-SL parameter combination.
 - Preserved the five top safety chips, Approval Center primary navigation, spacious visual layout, Demo-only MCP path, and frozen v0.4.1 trading core.
 
 ## 0.4.1 - 2026-08-23

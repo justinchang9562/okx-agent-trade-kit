@@ -55,6 +55,9 @@ def test_demo_order_numbers_never_use_exponent_notation(long_signal) -> None:
 
     DemoExecutor(backend).execute(plan)
 
+    assert backend.last_order["ordType"] == "limit"
+    assert backend.last_order["px"] == str(plan.entry)
+    assert backend.last_order["tgtCcy"] == "base_ccy"
     assert backend.last_order["sz"] == "0.00005"
     assert backend.last_order["slTriggerPx"] == "0.00000001"
     assert backend.last_order["tpTriggerPx"] == "0.00000005"

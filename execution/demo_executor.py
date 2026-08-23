@@ -44,7 +44,8 @@ class DemoExecutor:
             raise PreSubmitRejectedError("TP_SL_BACKEND_NOT_SUPPORTED")
         self._require_entry_allowed()
         return self.backend.place_order({
-            "instId": plan.symbol, "side": "buy", "ordType": "market",
+            "instId": plan.symbol, "side": "buy", "ordType": "limit",
+            "px": _plain_decimal(plan.entry),
             "sz": _plain_decimal(plan.position_size), "tdMode": "cash", "tgtCcy": "base_ccy",
             "clOrdId": plan.plan_id[:32],
             "slTriggerPx": _plain_decimal(plan.stop), "slOrdPx": "-1",
