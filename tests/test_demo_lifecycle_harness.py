@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ import pytest
 
 from data.models import AccountSnapshot, Instrument, MarketSnapshot
 from execution.base_backend import BackendStatus
+from execution.errors import PreSubmitRejectedError, SubmissionUncertainError
 from trading_agent.demo_lifecycle import REAL_DEMO_CONFIRMATION, DemoLifecycleVerifier, submission_gate
 
 
@@ -38,7 +40,13 @@ class StubBackend:
 
 
 class StubOrchestrator:
-    def __init__(self, market: MarketSnapshot, account: AccountSnapshot, backend: StubBackend) -> None:
+    def __init__(
+        self,
+        market: MarketSnapshot,
+        account: AccountSnapshot,
+        backend: StubBackend,
+        submit_error: Exception | None = None,
+    ) -> None:
         self.config = SimpleNamespace(environment="demo")
         self.adapter = SimpleNamespace(backend=backend)
         self.market_data = SimpleNamespace(get_snapshot=lambda _symbol: market)
@@ -48,6 +56,7 @@ class StubOrchestrator:
             reconcile_managed_positions=lambda: [],
         )
         self.approvals: list[tuple[str, str, float | None]] = []
+        self.submit_error = submit_error
 
     def get_health(self) -> dict:
         return {"trading_eligibility": {"blocking_reasons": []}}
@@ -65,6 +74,8 @@ class StubOrchestrator:
         self.approvals.append((plan_id, confirmation, position_size_cap))
         if confirmation:
             self.adapter.backend.place_calls += 1
+            if self.submit_error is not None:
+                raise self.submit_error
             return {"status": "SUBMITTED", "plan_id": plan_id}
         return {
             "status": "READY_FOR_EXACT_APPROVAL",
@@ -158,6 +169,74 @@ def test_lifecycle_minimum_size_is_lot_aligned_and_only_caps_risk_size(
         "CONFIRM DEMO ORDER",
         pytest.approx(0.00006),
     )
+    assert backend.place_calls == 1
+    assert result["status"] == "SUBMIT_SUCCEEDED"
+    assert result["timeline"][-1]["state"] == "SUBMIT_SUCCEEDED"
+
+
+def test_lifecycle_explicit_rejection_exports_sanitized_terminal_audit(
+    tmp_path, market, account,
+) -> None:
+    backend = StubBackend()
+    orchestrator = StubOrchestrator(
+        market,
+        account,
+        backend,
+        PreSubmitRejectedError(
+            "EXCHANGE_EXPLICIT_REJECTION",
+            diagnostics={
+                "tool": "spot_place_order",
+                "type": "OkxApiError",
+                "code": "401",
+                "message": "apiKey=test-never-write-this",
+                "endpoint": "POST /api/v5/trade/order",
+                "trace_id": "trace-test",
+                "server_version": "1.4.4",
+                "signature": "test-never-write-signature",
+            },
+        ),
+    )
+    verifier = DemoLifecycleVerifier(orchestrator, tmp_path)
+    precheck = verifier.precheck("BTC-USDT")
+
+    with pytest.raises(PreSubmitRejectedError) as raised:
+        verifier.submit(precheck, submit_flag=True, confirmation=REAL_DEMO_CONFIRMATION)
+
+    audit = raised.value.failure_audit
+    persisted = json.loads((tmp_path / audit["audit_export"].split("/")[-1]).read_text())
+    assert persisted["status"] == "SUBMIT_REJECTED"
+    assert persisted["reason"] == "EXCHANGE_EXPLICIT_REJECTION"
+    assert persisted["diagnostics"]["code"] == "401"
+    assert persisted["diagnostics"]["endpoint"] == "POST /api/v5/trade/order"
+    assert persisted["diagnostics"]["trace_id"] == "trace-test"
+    assert [event["state"] for event in persisted["timeline"]][-2:] == [
+        "SUBMIT_ATTEMPTED", "SUBMIT_REJECTED",
+    ]
+    serialized = json.dumps(persisted)
+    assert "test-never-write-this" not in serialized
+    assert "test-never-write-signature" not in serialized
+    assert backend.place_calls == 1
+
+
+def test_lifecycle_uncertain_submission_exports_submission_unknown_audit(
+    tmp_path, market, account,
+) -> None:
+    backend = StubBackend()
+    orchestrator = StubOrchestrator(
+        market,
+        account,
+        backend,
+        SubmissionUncertainError("MCP_TIMEOUT"),
+    )
+    verifier = DemoLifecycleVerifier(orchestrator, tmp_path)
+    precheck = verifier.precheck("BTC-USDT")
+
+    with pytest.raises(SubmissionUncertainError) as raised:
+        verifier.submit(precheck, submit_flag=True, confirmation=REAL_DEMO_CONFIRMATION)
+
+    persisted = json.loads((tmp_path / raised.value.failure_audit["audit_export"].split("/")[-1]).read_text())
+    assert persisted["status"] == "SUBMISSION_UNKNOWN"
+    assert persisted["timeline"][-1]["state"] == "SUBMISSION_UNKNOWN"
     assert backend.place_calls == 1
 
 

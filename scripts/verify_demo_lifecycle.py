@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     config = load_config()
     blocked = False
+    failed = False
     with TradingOrchestrator(config) as orchestrator:
         verifier = DemoLifecycleVerifier(orchestrator, config.root / "audit_exports" / "demo_lifecycle")
         if args.resume_plan:
@@ -40,9 +41,17 @@ def main(argv: list[str] | None = None) -> int:
                 except PermissionError as exc:
                     blocked = True
                     result = precheck | {"submission": "BLOCKED", "reason": str(exc)}
+                except Exception as exc:
+                    failed = True
+                    result = getattr(exc, "failure_audit", {
+                        "status": "SUBMIT_FAILED",
+                        "reason": type(exc).__name__,
+                    })
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
         if args.submit_real_demo and (args.confirm != REAL_DEMO_CONFIRMATION or blocked):
             return 2
+        if failed:
+            return 1
         return 0
 
 

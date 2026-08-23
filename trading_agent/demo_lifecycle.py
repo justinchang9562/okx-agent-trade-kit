@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from execution.errors import PreSubmitRejectedError, SubmissionUncertainError, sanitize_diagnostic_value
 from execution.order_state import OrderState
 from risk.position_sizing import minimum_executable_quantity
 from trading_agent.orchestrator import TradingOrchestrator
@@ -61,6 +62,41 @@ class DemoLifecycleVerifier:
             encoding="utf-8",
         )
         return path
+
+    @staticmethod
+    def _exception_chain(exc: BaseException) -> list[BaseException]:
+        chain: list[BaseException] = []
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            chain.append(current)
+            current = current.__cause__ or current.__context__
+        return chain
+
+    @classmethod
+    def _classify_submit_failure(cls, exc: BaseException) -> tuple[str, str, dict[str, Any]]:
+        chain = cls._exception_chain(exc)
+        explicit = next((item for item in chain if isinstance(item, PreSubmitRejectedError)), None)
+        uncertain = next((item for item in chain if isinstance(item, SubmissionUncertainError)), None)
+        messages = [str(item) for item in chain]
+        if uncertain is not None or any(message.startswith("SUBMISSION_UNKNOWN") for message in messages):
+            return "SUBMISSION_UNKNOWN", "SUBMISSION_UNKNOWN_RECONCILIATION_REQUIRED", {}
+        if explicit is not None:
+            diagnostics = sanitize_diagnostic_value(explicit.diagnostics)
+            return "SUBMIT_REJECTED", explicit.reason, diagnostics
+        explicit_message = next(
+            (
+                message
+                for message in messages
+                if message.startswith(("PRE_SUBMIT_REJECTED", "OKX_ORDER_REJECTED"))
+            ),
+            None,
+        )
+        if explicit_message:
+            return "SUBMIT_REJECTED", explicit_message.split(":", 1)[0], {}
+        safe_message = sanitize_diagnostic_value(str(exc))
+        return "SUBMIT_FAILED", type(exc).__name__, {"message": safe_message}
 
     def precheck(self, symbol: str) -> dict[str, Any]:
         symbol = symbol.upper()
@@ -145,15 +181,46 @@ class DemoLifecycleVerifier:
         plan_id = str(precheck["plan_id"])
         timeline = list(precheck.get("timeline", []))
         self._event(timeline, "USER_EXPLICITLY_APPROVES_REAL_DEMO_TEST")
-        result = self.orchestrator.approve_plan(
-            plan_id,
-            "CONFIRM DEMO ORDER",
-            position_size_cap=float(precheck["minimum_executable_quantity"]),
-        )
-        state = str(result.get("status") or result.get("execution", {}).get("state") or "SUBMITTED")
-        self._event(timeline, state, result)
+        self._event(timeline, "SUBMIT_ATTEMPTED", {"plan_id": plan_id})
+        try:
+            result = self.orchestrator.approve_plan(
+                plan_id,
+                "CONFIRM DEMO ORDER",
+                position_size_cap=float(precheck["minimum_executable_quantity"]),
+            )
+        except Exception as exc:
+            failure_status, failure_reason, diagnostics = self._classify_submit_failure(exc)
+            self._event(timeline, failure_status, {
+                "reason": failure_reason,
+                "diagnostics": diagnostics,
+            })
+            failure = sanitize_for_browser({
+                "mode": "REAL_DEMO_SUBMISSION_EXPLICITLY_APPROVED",
+                "status": failure_status,
+                "reason": failure_reason,
+                "diagnostics": diagnostics,
+                "plan_id": plan_id,
+                "result": {
+                    "status": failure_status,
+                    "reason": failure_reason,
+                    "diagnostics": diagnostics,
+                },
+                "timeline": timeline,
+                "restart_recovery_command": precheck["restart_recovery_command"],
+                "automatic_cancellation": False,
+                "protection_orders_preserved": True,
+            })
+            export_path = self._export(failure)
+            failure_with_export = failure | {"audit_export": str(export_path)}
+            try:
+                setattr(exc, "failure_audit", failure_with_export)
+            except Exception:
+                pass
+            raise
+        self._event(timeline, "SUBMIT_SUCCEEDED", result)
         output = sanitize_for_browser({
             "mode": "REAL_DEMO_SUBMISSION_EXPLICITLY_APPROVED",
+            "status": "SUBMIT_SUCCEEDED",
             "plan_id": plan_id,
             "result": result,
             "timeline": timeline,

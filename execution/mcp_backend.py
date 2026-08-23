@@ -12,11 +12,54 @@ from pathlib import Path
 from typing import Any
 
 from execution.base_backend import BackendStatus, BaseBackend
-from execution.errors import PreSubmitRejectedError, SubmissionUncertainError
+from execution.errors import PreSubmitRejectedError, SubmissionUncertainError, sanitize_diagnostic_value
 
 
 class MCPError(RuntimeError):
     """Raised for fail-closed transport or upstream MCP tool failures."""
+
+
+class MCPToolError(MCPError):
+    """A tools/call rejection with only safe, whitelisted diagnostic metadata."""
+
+    _FIELDS = {
+        "tool": "tool",
+        "type": "type",
+        "code": "code",
+        "message": "message",
+        "suggestion": "suggestion",
+        "endpoint": "endpoint",
+        "traceId": "trace_id",
+        "serverVersion": "server_version",
+    }
+
+    def __init__(
+        self,
+        tool_name: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        server_version: str | None = None,
+    ) -> None:
+        source = payload if isinstance(payload, dict) else {}
+        details: dict[str, Any] = {}
+        for source_key, output_key in self._FIELDS.items():
+            value = source.get(source_key)
+            if value not in (None, ""):
+                details[output_key] = sanitize_diagnostic_value(value)
+        safe_tool = sanitize_diagnostic_value(source.get("tool") or tool_name)
+        details["tool"] = str(safe_tool)
+        if "server_version" not in details and server_version:
+            details["server_version"] = sanitize_diagnostic_value(server_version)
+        self.safe_details = details
+        self.tool_name = details["tool"]
+        self.error_type = details.get("type")
+        self.code = details.get("code")
+        self.message = details.get("message")
+        self.suggestion = details.get("suggestion")
+        self.endpoint = details.get("endpoint")
+        self.trace_id = details.get("trace_id")
+        self.server_version = details.get("server_version")
+        super().__init__(f"MCP_TOOL_ERROR:{self.tool_name}")
 
 
 class StdioMCPClient:
@@ -34,10 +77,16 @@ class StdioMCPClient:
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
         try:
-            self._request("initialize", {
+            initialized = self._request("initialize", {
                 "protocolVersion": "2025-06-18", "capabilities": {},
                 "clientInfo": {"name": "okx-agent-trade-kit", "version": "0.4.1"},
             })
+            server_info = initialized.get("serverInfo", {})
+            self.server_version = (
+                str(sanitize_diagnostic_value(server_info.get("version")))
+                if isinstance(server_info, dict) and server_info.get("version")
+                else None
+            )
             self._notify("notifications/initialized", {})
         except Exception:
             self.close()
@@ -107,7 +156,25 @@ class StdioMCPClient:
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         result = self._request("tools/call", {"name": name, "arguments": arguments})
         if result.get("isError"):
-            raise MCPError(f"MCP_TOOL_ERROR:{name}")
+            error_payload = result.get("structuredContent")
+            if not isinstance(error_payload, dict):
+                error_payload = None
+                content = result.get("content", [])
+                for item in content if isinstance(content, list) else []:
+                    if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                        continue
+                    try:
+                        parsed = json.loads(item["text"])
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if isinstance(parsed, dict):
+                        error_payload = parsed
+                        break
+            raise MCPToolError(
+                name,
+                error_payload,
+                server_version=getattr(self, "server_version", None),
+            )
         structured = result.get("structuredContent")
         if isinstance(structured, dict):
             if structured.get("ok") is False:
@@ -301,6 +368,11 @@ class MCPBackend(BaseBackend):
     def place_order(self, order: dict[str, Any]) -> dict[str, Any]:
         try:
             return self._call("spot_place_order", order)
+        except MCPToolError as exc:
+            raise PreSubmitRejectedError(
+                "EXCHANGE_EXPLICIT_REJECTION",
+                diagnostics=exc.safe_details,
+            ) from exc
         except MCPError as exc:
             if str(exc).startswith(("MCP_TOOL_ERROR", "MCP_TOOL_FAILED", "MCP_ERROR")):
                 raise PreSubmitRejectedError("EXCHANGE_EXPLICIT_REJECTION") from exc

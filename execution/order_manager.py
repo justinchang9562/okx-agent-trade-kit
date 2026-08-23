@@ -90,7 +90,11 @@ class OrderManager:
                 plan.plan_id, OrderState.REJECTED.value,
                 last_error=f"PRE_SUBMIT_REJECTED:{str(exc)}",
             )
-            raise RuntimeError("PRE_SUBMIT_REJECTED") from exc
+            raise PreSubmitRejectedError(
+                exc.reason,
+                diagnostics=exc.diagnostics,
+                display_message=f"PRE_SUBMIT_REJECTED:{exc.reason}",
+            ) from exc
         except (SubmissionUncertainError, TimeoutError, ConnectionError) as exc:
             self.store.transition_order(
                 plan.plan_id, OrderState.SUBMISSION_UNKNOWN.value, last_error=type(exc).__name__
