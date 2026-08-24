@@ -11,6 +11,14 @@ def test_risk_sizing_and_position_cap(account, instrument) -> None:
     assert result.capped
 
 
+def test_aggressive_demo_profile_still_respects_available_balance(account, instrument) -> None:
+    result = calculate_position_size(account, instrument, 100, 99, 0.05, 0.80)
+    assert result.approved
+    assert result.quantity == pytest.approx(50.0)
+    assert result.notional_usdt == pytest.approx(5000)
+    assert result.capped
+
+
 def test_minimum_and_precision(account, instrument) -> None:
     tiny = calculate_position_size(account, instrument, 100_000_000, 99_999_999, 0.000001, 0.000001)
     assert not tiny.approved

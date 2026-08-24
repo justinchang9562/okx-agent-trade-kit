@@ -18,13 +18,18 @@ Position sizing risks `equity * risk_per_trade` across the entry-stop distance,
 then caps notional by `max_position_pct` and available USDT. Quantity is floored
 to OKX's reported lot size and rejected below OKX's reported minimum size.
 
+The active Demo profile is intentionally aggressive: a 5% per-trade risk
+budget, an 80% single-position cap, a 98% total-exposure cap, a 15% daily loss
+kill switch, and up to three Agent-managed positions. Available USDT remains a
+hard sizing ceiling. This profile does not apply to Live, which remains disabled.
+
 Approval and backtesting share the pure `build_executable_long_plan` revalidation
 path. Entry, stop and target are quantized from the executable price, then RR,
 Risk Manager and position sizing are rerun. The Demo lifecycle verifier may cap
 an already-approved quantity down to the minimum executable lot; it cannot raise
 the risk-sized quantity or bypass a rejection.
 
-The daily 3% limit activates `DAILY_KILL_SWITCH_ACTIVE`; three consecutive losses
+The configured daily loss limit activates `DAILY_KILL_SWITCH_ACTIVE`; three consecutive losses
 and the configured exposure cap separately stop new trades. The system never
 martingales, automatically averages down, revenge trades, removes stops, or
 increases risk to recover a loss. Spread and slippage percentages in config use

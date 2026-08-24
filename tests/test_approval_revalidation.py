@@ -88,7 +88,7 @@ def test_daily_kill_switch_after_plan_creation(tmp_path, market, account) -> Non
             """INSERT INTO trades
                (timestamp_ms, environment, backend, symbol, side, entry, size, stop,
                 take_profit, pnl, strategy, signal_score)
-               VALUES (?, 'demo', 'fake', 'BTC-USDT', 'LONG', 100, 1, 98, 103, -400, 'rule_scalping_v1', 8)""",
+               VALUES (?, 'demo', 'fake', 'BTC-USDT', 'LONG', 100, 1, 98, 103, -1600, 'rule_scalping_v1', 8)""",
             (now,),
         )
         orchestrator.trade_store.connection.commit()

@@ -13,12 +13,15 @@ timeframes:
     - 5m
 
 risk:
-  risk_per_trade: 0.005
-  max_position_pct: 0.10
-  max_total_exposure_pct: 0.90
-  max_daily_loss_pct: 0.03
+  # Aggressive DEMO profile. These limits intentionally allow large simulated
+  # positions while the normal stop, exposure, stale-data and execution guards
+  # remain mandatory.
+  risk_per_trade: 0.05
+  max_position_pct: 0.80
+  max_total_exposure_pct: 0.98
+  max_daily_loss_pct: 0.15
   max_consecutive_losses: 3
-  max_open_positions: 2
+  max_open_positions: 3
   unpriced_asset_dust_quantity: 0.00000001
 
 trade:

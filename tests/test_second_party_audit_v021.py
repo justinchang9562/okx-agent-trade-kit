@@ -96,13 +96,13 @@ def test_rr_is_revalidated_after_decimal_tick_rounding(long_signal, market, acco
 
 def test_reserved_entries_consume_slots_and_notional(tmp_path, long_signal) -> None:
     store = TradeStore(tmp_path / "reserved.db")
-    plans = [replace(plan_for(long_signal), plan_id=f"reserved-{index}") for index in range(2)]
+    plans = [replace(plan_for(long_signal), plan_id=f"reserved-{index}") for index in range(3)]
     for plan in plans:
         store.save_plan(plan)
         assert store.approve_and_create_order(plan, plan.plan_id, 100)
-    assert store.position_slots_in_use() == 2
-    assert store.daily_state().open_position_count == 2
-    assert store.reserved_entry_notional() == pytest.approx(2.0)
+    assert store.position_slots_in_use() == 3
+    assert store.daily_state().open_position_count == 3
+    assert store.reserved_entry_notional() == pytest.approx(3.0)
     rules = load_config().rules
     assert RiskManager(rules).evaluate(
         long_signal, _market_for(long_signal), _account_for(long_signal), store.daily_state(),
