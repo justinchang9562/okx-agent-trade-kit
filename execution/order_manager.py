@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
 
 from decision.trade_plan import TradePlan
@@ -181,7 +182,9 @@ class OrderManager:
             OrderState.CANCELLED.value,
         }
         if has_managed_fill:
-            protection, protective_order_ids = self._protection_state(local, order_id, filled)
+            protection, protective_order_ids = self._protection_state(
+                local, order_id, filled, remote_order=row,
+            )
             managed_state = (
                 OrderState.PARTIALLY_FILLED.value
                 if state == OrderState.CANCELLED.value else state
@@ -227,7 +230,11 @@ class OrderManager:
         }
 
     def _protection_state(
-        self, local: dict[str, Any], order_id: str | None, filled_quantity: float,
+        self,
+        local: dict[str, Any],
+        order_id: str | None,
+        filled_quantity: float,
+        remote_order: dict[str, Any] | None = None,
     ) -> tuple[str, list[str]]:
         try:
             rows = _rows(self.executor.backend.get_protection_orders(local["symbol"]))
@@ -236,13 +243,86 @@ class OrderManager:
         plan = self.store.get_plan(local["plan_id"])
         if plan is None:
             return "PROTECTION_PLAN_NOT_FOUND", []
+        try:
+            instrument_rows = _rows(self.executor.backend.get_instrument(local["symbol"]))
+            instrument = instrument_rows[0]
+            tick_size = float(instrument["tickSz"])
+            lot_size = Decimal(str(instrument.get("lotSz") or "0"))
+        except Exception:
+            return "PROTECTION_INSTRUMENT_UNAVAILABLE", []
+
+        parent = remote_order
+        if parent is None:
+            try:
+                parsed = json.loads(local.get("raw_response_json") or "{}")
+                parent = parsed if isinstance(parsed, dict) else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parent = {}
+
+        attached = parent.get("attachAlgoOrds") if isinstance(parent, dict) else None
+        attached_rows = [item for item in attached or [] if isinstance(item, dict)]
+        attached_ids = {
+            str(item.get("attachAlgoId"))
+            for item in attached_rows
+            if item.get("attachAlgoId")
+        }
+        tolerance = max(tick_size / 2, 1e-12)
+
+        def price_matches(value: Any, expected: float) -> bool:
+            try:
+                return abs(float(value) - float(expected)) <= tolerance
+            except (TypeError, ValueError):
+                return False
+
+        parent_has_expected_attachment = any(
+            price_matches(item.get("slTriggerPx"), plan.stop)
+            and price_matches(item.get("tpTriggerPx"), plan.take_profit)
+            and not item.get("failCode")
+            for item in attached_rows
+        )
+        parent_fill_time = None
+        if isinstance(parent, dict):
+            try:
+                parent_fill_time = int(parent.get("fillTime") or parent.get("uTime") or 0) or None
+            except (TypeError, ValueError):
+                parent_fill_time = None
+
         client_id = str(local["client_order_id"] or "")
-        matching = [row for row in rows if (
-            bool(order_id)
-            and str(row.get("ordId") or row.get("attachAlgoId") or "") == str(order_id)
-            or bool(client_id)
-            and str(row.get("clOrdId") or row.get("algoClOrdId") or "") == client_id
-        )]
+        expected_protection_side = "sell" if str(local.get("side") or "").upper() == "LONG" else "buy"
+
+        def matches_parent(row: dict[str, Any]) -> bool:
+            row_ids = {
+                str(value)
+                for value in (row.get("algoId"), row.get("attachAlgoId"), row.get("ordId"))
+                if value
+            }
+            if bool(order_id) and str(order_id) in row_ids:
+                return True
+            if attached_ids.intersection(row_ids):
+                return True
+            if bool(client_id) and str(row.get("clOrdId") or row.get("algoClOrdId") or "") == client_id:
+                return True
+
+            # OKX assigns a new algoId when an attached TP/SL pair activates,
+            # and the pending OCO row may omit both parent ordId and clOrdId.
+            # Correlate that row only with the full server-confirmed fingerprint:
+            # attached request, symbol, inverse side, prices, and fill timestamp.
+            try:
+                created_at = int(row.get("cTime") or 0)
+            except (TypeError, ValueError):
+                created_at = 0
+            return (
+                parent_has_expected_attachment
+                and parent_fill_time is not None
+                and abs(created_at - parent_fill_time) <= 1_000
+                and str(row.get("instId") or "") == str(local["symbol"])
+                and str(row.get("ordType") or "").lower() == "oco"
+                and str(row.get("side") or "").lower() == expected_protection_side
+                and price_matches(row.get("slTriggerPx"), plan.stop)
+                and price_matches(row.get("tpTriggerPx"), plan.take_profit)
+            )
+
+        matching = [row for row in rows if matches_parent(row)]
         identifiers = sorted({
             str(row.get("algoId") or row.get("attachAlgoId") or row.get("ordId") or "")
             for row in matching
@@ -250,11 +330,25 @@ class OrderManager:
         })
         if not matching:
             return "PROTECTION_NOT_FOUND", identifiers
-        try:
-            instrument_rows = _rows(self.executor.backend.get_instrument(local["symbol"]))
-            tick_size = float(instrument_rows[0]["tickSz"])
-        except Exception:
-            return "PROTECTION_INSTRUMENT_UNAVAILABLE", identifiers
+
+        required_quantity = Decimal(str(filled_quantity))
+        if isinstance(parent, dict):
+            raw_filled = parent.get("accFillSz") or parent.get("fillSz")
+            raw_fee = parent.get("fee")
+            fee_currency = str(parent.get("feeCcy") or local.get("fee_currency") or "").upper()
+            base_currency = str(local["symbol"]).split("-")[0].upper()
+            try:
+                if raw_filled not in (None, ""):
+                    required_quantity = Decimal(str(raw_filled))
+                if raw_fee not in (None, "") and fee_currency == base_currency:
+                    required_quantity += Decimal(str(raw_fee))
+            except (InvalidOperation, ValueError):
+                return "PROTECTION_QUANTITY_MISMATCH", identifiers
+        required_quantity = max(Decimal("0"), required_quantity)
+        if lot_size > 0:
+            required_quantity = (
+                required_quantity / lot_size
+            ).to_integral_value(rounding=ROUND_DOWN) * lot_size
 
         active_states = {"live", "open", "effective", "partially_effective"}
         sl_valid = False
@@ -262,7 +356,6 @@ class OrderManager:
         quantity_invalid = False
         price_invalid = False
         inactive = False
-        tolerance = max(tick_size / 2, 1e-12)
         for row in matching:
             raw_state = str(row.get("state") or row.get("status") or "").lower()
             if raw_state not in active_states:
@@ -270,11 +363,11 @@ class OrderManager:
                 continue
             quantity_text = row.get("sz") or row.get("ordSz") or row.get("actualSz")
             try:
-                covered = float(quantity_text)
-            except (TypeError, ValueError):
+                covered = Decimal(str(quantity_text))
+            except (InvalidOperation, TypeError, ValueError):
                 quantity_invalid = True
                 continue
-            if covered + 1e-12 < filled_quantity:
+            if covered < required_quantity:
                 quantity_invalid = True
                 continue
             sl_text = row.get("slTriggerPx")

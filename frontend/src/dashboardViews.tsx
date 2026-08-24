@@ -220,6 +220,30 @@ export function protectionSummary(positions: unknown): { protected: number; tota
   return { protected: protectedCount, total: managed.length, critical: managed.some((item) => item.protection_state !== 'PROTECTED') }
 }
 
+export function managedUnrealizedPnL(positions: unknown, market: unknown): number | undefined {
+  const managed = records(positions)
+  if (!managed.length) return 0
+  const symbols = asRecord(asRecord(market).symbols)
+  let total = 0
+  for (const position of managed) {
+    const symbol = String(position.symbol ?? '')
+    const realtime = asRecord(symbols[symbol])
+    const entry = numeric(position.entry_price)
+    const quantity = numeric(position.quantity)
+    const exited = numeric(position.exit_filled_quantity) ?? 0
+    const current = numeric(realtime.last_price)
+    if (
+      !symbol
+      || realtime.stream_state !== 'CONNECTED'
+      || entry === undefined
+      || quantity === undefined
+      || current === undefined
+    ) return undefined
+    total += (current - entry) * Math.max(0, quantity - exited)
+  }
+  return total
+}
+
 export function OverviewMetrics({ data, language }: { data: DashboardData; language: Language }) {
   const account = asRecord(data.account)
   const positions = asRecord(data.positions)
@@ -235,12 +259,14 @@ export function OverviewMetrics({ data, language }: { data: DashboardData; langu
   const walletPct = numeric(observability.wallet_exposure_pct)
   const managedExposure = numeric(summary.managed_exposure_usdt ?? exposure.managed_exposure_usdt)
   const managedExposurePct = numeric(summary.managed_exposure_pct ?? exposure.managed_exposure_pct)
+  const unrealizedPnL = managedUnrealizedPnL(positions.managed_positions, market)
   const confirmed = numeric(marketMetrics.confirmed_candle_timestamp)
     ?? Math.max(0, ...records(Object.values(asRecord(market.symbols))).map((item) => numeric(asRecord(item.confirmed_candle_timestamps)['1m']) ?? 0))
   return <>
-    <div className="metric-row">
+    <div className="metric-row overview-primary">
       <Metric label={copy(language, '账户权益', 'Account equity')} value={formatUSDT(account.equity_usdt, language)} detail={copy(language, 'OKX 模拟盘账户总权益', 'OKX Demo total account equity')} accent="blue" />
       <Metric label={copy(language, '可用 USDT', 'Available USDT')} value={formatUSDT(account.available_usdt, language)} detail={copy(language, '可用于交易的 USDT 余额', 'USDT balance available to trade')} />
+      <Metric label={copy(language, '未实现损益', 'Unrealized PnL')} value={formatPnL(unrealizedPnL, language)} detail={copy(language, '当前托管仓位浮动盈亏', 'Open Agent-managed position PnL')} valueClassName={(unrealizedPnL ?? 0) > 0 ? 'positive' : (unrealizedPnL ?? 0) < 0 ? 'negative' : ''} />
       <Metric label={copy(language, '托管仓位', 'Managed positions')} value={`${formatNumber(managedCount, language, 0, 0)} / ${formatNumber(asRecord(asRecord(data.settings).risk).max_open_positions, language, 0, 0)}`} detail={copy(language, '不包含外部钱包资产', 'External wallet assets excluded')} />
       <Metric label={copy(language, '保护状态', 'Protection')} value={`${protection.protected} / ${protection.total}`} detail={protection.critical ? translateCode(language, 'POSITION_UNPROTECTED') : copy(language, '止盈止损保护', 'Stop-loss / take-profit protection')} accent={protection.critical ? 'amber' : undefined} />
     </div>

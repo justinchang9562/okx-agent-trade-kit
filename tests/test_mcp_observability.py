@@ -129,6 +129,15 @@ class FakeMCPClient:
         raise self.error
 
 
+class RecordingMCPClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def call_tool(self, name: str, arguments: dict) -> dict:
+        self.calls.append((name, arguments))
+        return {"data": []}
+
+
 class HarnessMCPBackend(MCPBackend):
     def status(self) -> BackendStatus:
         return BackendStatus("mcp", "CONNECTED", True, True)
@@ -184,3 +193,15 @@ def test_timeout_stays_submission_unknown_and_never_submits_twice(tmp_path, long
     assert store.order_for_plan(plan.plan_id)["state"] == OrderState.SUBMISSION_UNKNOWN.value
     assert client.place_calls == 1
     store.close()
+
+
+def test_protection_query_aggregates_all_supported_algo_types() -> None:
+    client = RecordingMCPClient()
+    backend = MCPBackend(client=client)
+
+    backend.get_protection_orders("BTC-USDT")
+
+    assert client.calls == [("spot_get_algo_orders", {
+        "limit": 100,
+        "instId": "BTC-USDT",
+    })]

@@ -338,7 +338,10 @@ class MCPBackend(BaseBackend):
         return self._call("spot_get_order", {"instId": symbol, "clOrdId": client_order_id})
 
     def get_protection_orders(self, symbol: str | None = None) -> dict[str, Any]:
-        args: dict[str, Any] = {"ordType": "conditional", "limit": 100}
+        # Attached stop-loss/take-profit pairs become OCO algo orders after the
+        # entry fills.  Omitting ordType asks the official OKX MCP tool to
+        # aggregate conditional, OCO, and trailing-stop pending orders.
+        args: dict[str, Any] = {"limit": 100}
         if symbol:
             args["instId"] = symbol
         return self._call("spot_get_algo_orders", args)

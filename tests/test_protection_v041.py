@@ -79,3 +79,85 @@ def test_partial_fill_growth_revalidates_coverage(tmp_path, long_signal) -> None
     assert manager._protection_state(local, "okx-1", first_fill)[0] == "PROTECTED"
     assert manager._protection_state(local, "okx-1", later_fill)[0] == "PROTECTION_QUANTITY_MISMATCH"
     store.close()
+
+
+def test_attached_oco_without_parent_ids_matches_server_fingerprint_and_net_fill(
+    tmp_path, long_signal,
+) -> None:
+    plan, backend, store, manager, local = prepared(tmp_path, long_signal)
+    backend.get_instrument = lambda _symbol: {
+        "data": {"data": [{"tickSz": "0.1", "lotSz": "0.00000001"}]},
+    }
+    fill_time = "1787554264554"
+    filled = 0.99226344
+    fee = -0.000793810752
+    backend.protection = [{
+        "algoId": "active-oco-1",
+        "instId": plan.symbol,
+        "ordType": "oco",
+        "state": "live",
+        "side": "sell",
+        "cTime": fill_time,
+        "sz": "0.99146962",
+        "slTriggerPx": str(plan.stop),
+        "tpTriggerPx": str(plan.take_profit),
+    }]
+    remote = {
+        "ordId": "okx-1",
+        "clOrdId": plan.plan_id,
+        "state": "filled",
+        "accFillSz": str(filled),
+        "fee": str(fee),
+        "feeCcy": "BTC",
+        "fillTime": fill_time,
+        "attachAlgoOrds": [{
+            "attachAlgoId": "requested-attachment-1",
+            "slTriggerPx": str(plan.stop),
+            "tpTriggerPx": str(plan.take_profit),
+            "failCode": "",
+        }],
+    }
+
+    state, identifiers = manager._protection_state(
+        local, "okx-1", filled, remote_order=remote,
+    )
+
+    assert state == "PROTECTED"
+    assert identifiers == ["active-oco-1"]
+    store.close()
+
+
+@pytest.mark.parametrize("mutation", [
+    {"cTime": "1787554270000"},
+    {"side": "buy"},
+    {"tpTriggerPx": "999999"},
+])
+def test_attached_oco_fingerprint_never_matches_unrelated_order(
+    tmp_path, long_signal, mutation,
+) -> None:
+    plan, backend, store, manager, local = prepared(tmp_path, long_signal)
+    candidate = {
+        "algoId": "unrelated-oco",
+        "instId": plan.symbol,
+        "ordType": "oco",
+        "state": "live",
+        "side": "sell",
+        "cTime": "1787554264554",
+        "sz": str(plan.position_size),
+        "slTriggerPx": str(plan.stop),
+        "tpTriggerPx": str(plan.take_profit),
+    }
+    candidate.update(mutation)
+    backend.protection = [candidate]
+    remote = {
+        "fillTime": "1787554264554",
+        "attachAlgoOrds": [{
+            "slTriggerPx": str(plan.stop),
+            "tpTriggerPx": str(plan.take_profit),
+            "failCode": "",
+        }],
+    }
+    assert manager._protection_state(
+        local, "okx-1", plan.position_size, remote_order=remote,
+    )[0] == "PROTECTION_NOT_FOUND"
+    store.close()
